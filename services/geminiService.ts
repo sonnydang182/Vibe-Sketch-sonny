@@ -1,7 +1,22 @@
 import { GoogleGenAI, Type, Modality } from "@google/genai";
-import { Scene, Language } from "../types";
+import { Scene, Language, ImageProvider } from "../types";
+import { generateImageWithCoachio } from "./coachioService";
 
-const getAI = () => new GoogleGenAI({ apiKey: process.env.API_KEY });
+let userGeminiApiKey: string | null = null;
+
+/** Set the runtime Gemini API key (called from settings). Pass empty string to clear. */
+export const setGeminiApiKey = (key: string | null | undefined) => {
+  userGeminiApiKey = key && key.trim() ? key.trim() : null;
+};
+
+/** Returns the active Gemini API key: user-supplied takes precedence, then env. */
+export const getActiveGeminiKey = (): string | undefined => {
+  if (userGeminiApiKey) return userGeminiApiKey;
+  const envKey = process.env.API_KEY;
+  return envKey && envKey.length > 0 ? envKey : undefined;
+};
+
+const getAI = () => new GoogleGenAI({ apiKey: getActiveGeminiKey() });
 
 /**
  * Helper for Retry Logic (Handles 429 Rate Limits and 503 Overloads)
@@ -186,40 +201,58 @@ export const generateScriptScenes = async (title: string, duration: string, lang
   }
 };
 
+interface ImageProviderOpts {
+  provider?: ImageProvider;
+  coachioApiKey?: string;
+}
+
 /**
- * Generate Doodle Image (With Retry)
+ * Generate Doodle Image (With Retry, supports Gemini or Coachio GPT Image 2)
  */
-export const generateDoodleImage = async (visualPrompt: string, textToRender: string, aspectRatio: '16:9' | '9:16', language: Language): Promise<string | undefined> => {
-  const ai = getAI();
-  
+export const generateDoodleImage = async (
+  visualPrompt: string,
+  textToRender: string,
+  aspectRatio: '16:9' | '9:16',
+  language: Language,
+  opts: ImageProviderOpts = {}
+): Promise<string | undefined> => {
   const fullPrompt = `
     Create a clean, funny, minimalist digital illustration in the style of "Better Than Yesterday" or "Casually Explained" YouTube channels.
-    
+
     SUBJECT: A classic STICK FIGURE representing this concept: ${visualPrompt}.
     TEXT: Write "${textToRender}" clearly in the image. Font: Hand-written, bold black.
-    
+
     STYLE RULES:
-    1. CHARACTER: Classic stickman. Perfect circle head. Simple stick limbs. 
+    1. CHARACTER: Classic stickman. Perfect circle head. Simple stick limbs.
     2. EXPRESSION: The stickman MUST have a clear facial expression (Eyes and Mouth only).
     3. LINES: Clean, consistent, smooth black lines. NOT messy. NO "pencil" texture.
-    4. COLOR: BLACK lines only. 
+    4. COLOR: BLACK lines only.
     5. BACKGROUND: Solid OFF-WHITE / BEIGE (#FDF6E3). Flat color.
-    
+
     Important: The text "${textToRender}" must be legible. It is in ${language}.
-    
+
     COMPOSITION:
     - Center the stickman.
-    - Keep it simple and uncluttered. 
+    - Keep it simple and uncluttered.
     - High contrast: Black on Beige.
     - Format: ${aspectRatio === '9:16' ? 'Vertical Portrait (9:16)' : 'Horizontal Landscape (16:9)'}.
   `;
 
+  if (opts.provider === 'coachio_gpt_image_2') {
+    return generateImageWithCoachio({
+      apiKey: opts.coachioApiKey || '',
+      prompt: fullPrompt,
+      aspectRatio,
+    });
+  }
+
+  const ai = getAI();
   return withRetry(async () => {
     const response = await ai.models.generateContent({
       model: "gemini-3-pro-image-preview",
       contents: fullPrompt,
       config: {
-        imageConfig: { 
+        imageConfig: {
             aspectRatio: aspectRatio,
             imageSize: "1K"
         }
@@ -238,36 +271,78 @@ export const generateDoodleImage = async (visualPrompt: string, textToRender: st
 };
 
 /**
- * Generate Thumbnail Image (With Retry)
+ * Generate Thumbnail Image — High-CTR YouTube style for stick-figure doodle channels.
+ * Matches the visual language of channels like "Better Than Yesterday" /
+ * Vietnamese doodle channels: bold handwritten title, power-words highlighted in
+ * red or yellow, dramatic stickman expression, optional comparison split or red arrow.
  */
-export const generateThumbnailImage = async (title: string, visualMetaphor: string = "", aspectRatio: '16:9' | '9:16'): Promise<string | undefined> => {
-    const ai = getAI();
+export const generateThumbnailImage = async (
+  title: string,
+  visualMetaphor: string = "",
+  aspectRatio: '16:9' | '9:16',
+  opts: ImageProviderOpts = {}
+): Promise<string | undefined> => {
+    const orientationGuide = aspectRatio === '9:16'
+      ? `VERTICAL PORTRAIT (9:16) — for Shorts/TikTok. Stack the title text on TOP (2-3 lines), the stick figure in the lower 2/3.`
+      : `HORIZONTAL LANDSCAPE (16:9) — for YouTube. Place the title text on the LEFT half (2-3 lines), the stick figure on the RIGHT half. Or split top/bottom.`;
+
     const prompt = `
-      YouTube Thumbnail for: "${title}".
-      Visual: A funny, highly expressive STICK FIGURE engaging with: ${visualMetaphor}.
-      
+      Create a HIGH-CTR YOUTUBE THUMBNAIL in the visual style of the Vietnamese
+      doodle channels "Better Than Yesterday", "Tri Thức Vui Vẻ" — stick-figure
+      illustration with bold handwritten typography.
+
+      TITLE TEXT (must appear large and legible in the image):
+      "${title}"
+      - Font: BOLD HAND-WRITTEN / MARKER style. Mostly black.
+      - Highlight 1-2 POWER WORDS in BRIGHT RED or YELLOW HIGHLIGHTER (use a
+        yellow rectangular highlighter behind a key word, OR color a power word red).
+      - Title takes ~40-50% of the canvas. Multi-line, tight leading.
+
+      STICK FIGURE:
+      - Classic stickman: perfect circle head, simple black stick limbs.
+      - HIGHLY DRAMATIC expression — shocked / amazed / mind-blown / excited.
+      - Clear pose that visually echoes the concept: ${visualMetaphor || title}.
+      - Optional supporting prop (book, light bulb, dollar sign, trophy, brain icon, phone, clock).
+
+      ATTENTION-GRAB ELEMENTS (add 1-2, not all):
+      - Bold RED hand-drawn arrow pointing at the stickman or key word.
+      - Or split the canvas into a "before vs after" / "wrong vs right" comparison
+        with a red ✗ on one side and green ✓ on the other.
+      - Or a small percentage / number badge ("90%", "3 BƯỚC") in red or yellow.
+
       STYLE RULES:
-      1. CHARACTER: Classic stickman. Perfect circle head. Simple stick limbs. 
-      2. EXPRESSION: Highly expressive face (shocked, thinking, happy).
-      3. LINES: Clean, consistent, smooth black lines. NOT messy.
-      4. BACKGROUND: Solid OFF-WHITE / BEIGE (#FDF6E3). Flat color.
-      
-      Format: Minimalist, clean, high contrast (Black on Beige).
-      No text in the image.
+      1. Background: solid OFF-WHITE / BEIGE (#FDF6E3). Flat color, no texture.
+      2. Lines: clean, smooth, consistent BLACK strokes. No pencil grain.
+      3. Color palette: black + beige + accent RED + accent YELLOW. Nothing else.
+      4. High contrast, instantly readable on a phone screen.
+      5. NO real photographs. NO 3D rendering. Pure 2D doodle.
+
+      LAYOUT: ${orientationGuide}
+
+      The title text must be in the same language as written above (do NOT translate).
     `;
-  
+
+    if (opts.provider === 'coachio_gpt_image_2') {
+      return generateImageWithCoachio({
+        apiKey: opts.coachioApiKey || '',
+        prompt,
+        aspectRatio,
+      });
+    }
+
+    const ai = getAI();
     return withRetry(async () => {
       const response = await ai.models.generateContent({
         model: "gemini-3-pro-image-preview",
         contents: prompt,
         config: {
-          imageConfig: { 
+          imageConfig: {
               aspectRatio: aspectRatio,
-              imageSize: "1K" 
+              imageSize: "1K"
           }
         }
       });
-  
+
       if (response.candidates && response.candidates[0].content.parts) {
         for (const part of response.candidates[0].content.parts) {
           if (part.inlineData && part.inlineData.data) {

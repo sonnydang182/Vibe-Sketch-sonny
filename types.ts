@@ -29,6 +29,8 @@ export enum AppStep {
 
 export type Language = 'Vietnamese' | 'English' | 'Japanese';
 
+export type ImageProvider = 'gemini' | 'coachio_gpt_image_2';
+
 export interface GenerationConfig {
   topic: string;
   tone: 'Stoic' | 'Motivational' | 'Dark Philosophy' | 'Humorous';
@@ -36,3 +38,26 @@ export interface GenerationConfig {
   aspectRatio: '16:9' | '9:16';
   language: Language;
 }
+
+export interface AppSettings {
+  imageProvider: ImageProvider;
+  coachioApiKey: string;
+  geminiApiKey: string;
+}
+
+export interface HistoryEntry {
+  id: string;
+  timestamp: string;
+  topic: string;
+  selectedTitle: string;
+  thumbnailUrl?: string;
+  config: GenerationConfig;
+  titles: GeneratedTitle[];
+  scenes: Scene[];
+  fullScript: string;
+  step: AppStep;
+  lastGeneratedTopic: string;
+  lastGeneratedTitleId: string;
+}
+
+export type DashboardView = 'create' | 'history' | 'settings';

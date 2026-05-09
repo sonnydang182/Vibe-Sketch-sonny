@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Button } from './Button';
 import { GenerationConfig, Language } from '../types';
+import { TopicSuggestionsModal } from './TopicSuggestionsModal';
 
 interface StepInputProps {
   config: GenerationConfig;
@@ -10,6 +11,7 @@ interface StepInputProps {
 }
 
 export const StepInput: React.FC<StepInputProps> = ({ config, setConfig, onNext, isLoading }) => {
+  const [suggestOpen, setSuggestOpen] = useState(false);
   const durations = ['Short (60s)', 'Medium (3 mins)', 'Long (5-10 mins)'] as const;
   const tones = ['Stoic', 'Motivational', 'Dark Philosophy', 'Humorous'] as const;
   
@@ -51,7 +53,26 @@ export const StepInput: React.FC<StepInputProps> = ({ config, setConfig, onNext,
         </div>
 
         <div className="space-y-2">
-          <label className="font-hand text-2xl text-ink block">Chủ đề (Topic)</label>
+          <div className="flex items-center justify-between">
+            <label className="font-hand text-2xl text-ink block">Chủ đề (Topic)</label>
+            <button
+              type="button"
+              onClick={() => setSuggestOpen(true)}
+              className="font-hand text-base px-3 py-1 rounded-full border-2 border-ink/40 text-ink bg-white/70 hover:bg-white hover:border-ink transition-colors flex items-center gap-1.5 shadow-sm"
+              title={
+                config.language === 'English' ? 'Open topic suggestions' :
+                config.language === 'Japanese' ? 'トピック候補を開く' :
+                'Mở gợi ý chủ đề'
+              }
+            >
+              <span>✨</span>
+              <span>
+                {config.language === 'English' ? 'TOPIC IDEAS' :
+                 config.language === 'Japanese' ? 'トピック候補' :
+                 'GỢI Ý CHỦ ĐỀ'}
+              </span>
+            </button>
+          </div>
           <input
             type="text"
             value={config.topic}
@@ -138,17 +159,24 @@ export const StepInput: React.FC<StepInputProps> = ({ config, setConfig, onNext,
             </div>
         </div>
 
-        <Button 
-          onClick={onNext} 
-          disabled={!config.topic} 
+        <Button
+          onClick={onNext}
+          disabled={!config.topic}
           isLoading={isLoading}
           className="w-full mt-4"
         >
-          {config.language === 'English' ? 'Generate Ideas' : 
-           config.language === 'Japanese' ? 'アイデアを生成' : 
+          {config.language === 'English' ? 'Generate Ideas' :
+           config.language === 'Japanese' ? 'アイデアを生成' :
            'Tạo Ý Tưởng'}
         </Button>
       </div>
+
+      <TopicSuggestionsModal
+        open={suggestOpen}
+        language={config.language}
+        onClose={() => setSuggestOpen(false)}
+        onPick={(t) => setConfig({ ...config, topic: t })}
+      />
     </div>
   );
 };
