@@ -1,5 +1,8 @@
 const COACHIO_BASE = "https://api.coachio.ai/api/v1";
 
+/** Default LLM model used for all chat completions. */
+export const COACHIO_DEFAULT_MODEL = "google/gemini-3.1-flash-lite";
+
 type CoachioAspectRatio =
   | "auto" | "1:1" | "5:4" | "9:16" | "21:9" | "16:9"
   | "4:3" | "3:2" | "4:5" | "3:4" | "2:3";
@@ -159,6 +162,106 @@ export const fetchAsDataUrl = async (url: string): Promise<string> => {
     fr.onerror = () => reject(fr.error);
     fr.readAsDataURL(blob);
   });
+};
+
+interface CoachioChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+interface CoachioChatOptions {
+  model?: string;
+  temperature?: number;
+  maxTokens?: number;
+  system?: string;
+}
+
+interface CoachioChatResponse {
+  choices?: Array<{
+    message?: { role?: string; content?: string };
+    text?: string;
+  }>;
+}
+
+/**
+ * Call Coachio's OpenAI-compatible chat completions endpoint and return the
+ * assistant's text reply. Non-streaming.
+ */
+export const coachioChat = async (
+  apiKey: string,
+  userPrompt: string,
+  opts: CoachioChatOptions = {},
+): Promise<string> => {
+  if (!apiKey) throw new Error("Coachio API key is missing");
+
+  const messages: CoachioChatMessage[] = [];
+  if (opts.system) messages.push({ role: "system", content: opts.system });
+  messages.push({ role: "user", content: userPrompt });
+
+  const res = await fetch(`${COACHIO_BASE}/llm/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-API-Key": apiKey,
+    },
+    body: JSON.stringify({
+      model: opts.model || COACHIO_DEFAULT_MODEL,
+      messages,
+      stream: false,
+      temperature: opts.temperature ?? 0.7,
+      max_tokens: opts.maxTokens ?? 2512,
+    }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Coachio chat failed (${res.status}): ${text}`);
+  }
+
+  const data: CoachioChatResponse = await res.json();
+  const content = data.choices?.[0]?.message?.content ?? data.choices?.[0]?.text;
+  if (!content) throw new Error("Coachio chat: empty response");
+  return content;
+};
+
+/**
+ * Extract a JSON value from a chat reply that may be wrapped in ```json fences,
+ * prefixed with prose, or otherwise noisy. Throws if no parsable JSON is found.
+ */
+const extractJSON = <T,>(raw: string): T => {
+  const trimmed = raw.trim();
+  // Strip ``` or ```json fences if present.
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fenced ? fenced[1].trim() : trimmed;
+  try {
+    return JSON.parse(candidate) as T;
+  } catch {
+    // Last resort: find the first {...} or [...] block.
+    const firstBrace = candidate.search(/[\[{]/);
+    if (firstBrace >= 0) {
+      const lastBrace = Math.max(candidate.lastIndexOf("}"), candidate.lastIndexOf("]"));
+      if (lastBrace > firstBrace) {
+        return JSON.parse(candidate.slice(firstBrace, lastBrace + 1)) as T;
+      }
+    }
+    throw new Error(`Coachio chat: response is not valid JSON: ${raw.slice(0, 200)}`);
+  }
+};
+
+/**
+ * Chat completion that expects a JSON reply. Adds a system nudge so the model
+ * returns only JSON, then parses defensively.
+ */
+export const coachioChatJSON = async <T>(
+  apiKey: string,
+  userPrompt: string,
+  opts: CoachioChatOptions = {},
+): Promise<T> => {
+  const systemNudge =
+    "You are a strict JSON generator. Output ONLY valid JSON matching the requested schema — no prose, no markdown fences, no commentary. Start your reply with '[' or '{' and end with the matching closing bracket.";
+  const system = opts.system ? `${opts.system}\n\n${systemNudge}` : systemNudge;
+  const raw = await coachioChat(apiKey, userPrompt, { ...opts, system });
+  return extractJSON<T>(raw);
 };
 
 /**

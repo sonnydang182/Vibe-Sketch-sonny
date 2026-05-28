@@ -9,14 +9,14 @@ interface StepSettingsProps {
 
 const PROVIDERS: { id: ImageProvider; label: string; description: string }[] = [
   {
-    id: 'gemini',
-    label: 'Gemini 3 Pro Image (mặc định)',
-    description: 'Sử dụng API key của Google AI Studio (Gemini). Dùng cho cả tạo text và tạo ảnh.',
+    id: 'coachio_gpt_image_2',
+    label: 'Coachio · GPT Image 2 (mặc định)',
+    description: 'Tạo ảnh qua API Coachio (model gpt_image_2). Chỉ cần Coachio API Key.',
   },
   {
-    id: 'coachio_gpt_image_2',
-    label: 'Coachio · GPT Image 2',
-    description: 'Tạo ảnh qua API Coachio (model gpt_image_2). Vẫn cần Gemini key cho tạo text.',
+    id: 'gemini',
+    label: 'Gemini 3 Pro Image',
+    description: 'Tạo ảnh trực tiếp qua Gemini. Cần Gemini API Key.',
   },
 ];
 
@@ -34,23 +34,45 @@ export const StepSettings: React.FC<StepSettingsProps> = ({ settings, onSave }) 
     <div className="flex flex-col gap-6 max-w-2xl mx-auto w-full animate-fade-in">
       <div>
         <h2 className="font-hand text-4xl font-bold text-ink">Cấu hình</h2>
-        <p className="font-sans text-gray-600">Chọn nhà cung cấp tạo ảnh và quản lý API key.</p>
+        <p className="font-sans text-gray-600">
+          Chỉ cần dán <strong>Coachio API Key</strong> là chạy được toàn bộ wizard tới bước 5. Gemini key chỉ cần thêm nếu muốn dùng voiceover (TTS).
+        </p>
       </div>
 
       <div className="bg-white/50 backdrop-blur-sm p-8 rounded-xl border-2 border-ink/10 shadow-sm space-y-6">
-        {/* Gemini API Key — required for text + (default) image */}
+        {/* Coachio API Key — primary, handles text + images */}
         <div className="space-y-2">
-          <label className="font-hand text-2xl text-ink block">Gemini API Key</label>
+          <label className="font-hand text-2xl text-ink block">
+            Coachio API Key <span className="font-sans text-xs uppercase tracking-wider text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded">Khuyến nghị</span>
+          </label>
+          <input
+            type="password"
+            autoComplete="off"
+            value={draft.coachioApiKey}
+            onChange={e => setDraft({ ...draft, coachioApiKey: e.target.value })}
+            placeholder="lv_xxxxxxxxxxxxxxxxxxxxxxxx"
+            className="w-full bg-paper border-2 border-gray-300 focus:border-ink rounded-lg p-3 font-mono text-sm outline-none transition-colors"
+          />
+          <p className="font-sans text-xs text-gray-500">
+            Dùng cho tạo tiêu đề, kịch bản và ảnh. Lưu cục bộ trong trình duyệt (localStorage).
+          </p>
+        </div>
+
+        {/* Gemini API Key — optional, only needed for TTS */}
+        <div className="space-y-2 border-t border-ink/10 pt-6">
+          <label className="font-hand text-2xl text-ink block">
+            Gemini API Key <span className="font-sans text-xs uppercase tracking-wider text-gray-600 bg-gray-100 px-1.5 py-0.5 rounded">Tuỳ chọn</span>
+          </label>
           <input
             type="password"
             autoComplete="off"
             value={draft.geminiApiKey}
             onChange={e => setDraft({ ...draft, geminiApiKey: e.target.value })}
-            placeholder="AIza... (lấy ở aistudio.google.com)"
+            placeholder="AIza..."
             className="w-full bg-paper border-2 border-gray-300 focus:border-ink rounded-lg p-3 font-mono text-sm outline-none transition-colors"
           />
           <p className="font-sans text-xs text-gray-500">
-            Dùng cho tạo tiêu đề, kịch bản, voiceover và ảnh (khi chọn Gemini). Lưu cục bộ trong trình duyệt.
+            Chỉ cần nếu bạn muốn tạo voiceover (TTS). Cũng có thể dùng Gemini cho text/ảnh thay cho Coachio nếu bạn thích.
           </p>
         </div>
 
@@ -76,23 +98,6 @@ export const StepSettings: React.FC<StepSettingsProps> = ({ settings, onSave }) 
             ))}
           </div>
         </div>
-
-        {draft.imageProvider === 'coachio_gpt_image_2' && (
-          <div className="space-y-2">
-            <label className="font-hand text-2xl text-ink block">Coachio API Key</label>
-            <input
-              type="password"
-              autoComplete="off"
-              value={draft.coachioApiKey}
-              onChange={e => setDraft({ ...draft, coachioApiKey: e.target.value })}
-              placeholder="lv_xxxxxxxxxxxxxxxxxxxxxxxx"
-              className="w-full bg-paper border-2 border-gray-300 focus:border-ink rounded-lg p-3 font-mono text-sm outline-none transition-colors"
-            />
-            <p className="font-sans text-xs text-gray-500">
-              Lưu cục bộ trong trình duyệt (localStorage). Không gửi lên server bên thứ ba.
-            </p>
-          </div>
-        )}
 
         <div className="flex items-center gap-3 pt-2">
           <Button onClick={handleSave} className="px-6">

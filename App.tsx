@@ -18,6 +18,7 @@ import {
   rewriteScript,
   generateSpeech,
   setGeminiApiKey,
+  setCoachioApiKey,
   getActiveGeminiKey,
   buildDurationProfile,
 } from './services/geminiService';
@@ -49,7 +50,7 @@ const HISTORY_KEY = 'vibesketch.history.v1';
 const ACTIVE_PROJECT_KEY = 'vibesketch.activeProjectId.v1';
 
 const DEFAULT_SETTINGS: AppSettings = {
-  imageProvider: 'gemini',
+  imageProvider: 'coachio_gpt_image_2',
   coachioApiKey: '',
   geminiApiKey: '',
 };
@@ -215,10 +216,13 @@ const App: React.FC = () => {
   const [isGeneratingThumbnail, setIsGeneratingThumbnail] = useState(false);
   const [thumbnailError, setThumbnailError] = useState<string | undefined>(undefined);
 
-  // Push Gemini key into the service module whenever settings change.
+  // Push API keys into the service module whenever settings change.
   useEffect(() => {
     setGeminiApiKey(settings.geminiApiKey || null);
   }, [settings.geminiApiKey]);
+  useEffect(() => {
+    setCoachioApiKey(settings.coachioApiKey || null);
+  }, [settings.coachioApiKey]);
 
   // Persist settings
   useEffect(() => {
@@ -230,6 +234,8 @@ const App: React.FC = () => {
   }, [settings]);
 
   const hasGeminiKey = Boolean(settings.geminiApiKey?.trim() || getActiveGeminiKey());
+  const hasCoachioKey = Boolean(settings.coachioApiKey?.trim());
+  const hasAnyKey = hasGeminiKey || hasCoachioKey;
 
   // Persist active project id
   useEffect(() => {
@@ -445,8 +451,17 @@ const App: React.FC = () => {
       };
     }));
 
+    // Smart-fallback: if the saved image provider can't run because its key is
+    // missing, swap to the other one when that one IS available.
+    let provider = settings.imageProvider;
+    if (provider === 'coachio_gpt_image_2' && !hasCoachioKey && hasGeminiKey) {
+      provider = 'gemini';
+    } else if (provider === 'gemini' && !hasGeminiKey && hasCoachioKey) {
+      provider = 'coachio_gpt_image_2';
+    }
+
     return {
-      provider: settings.imageProvider,
+      provider,
       coachioApiKey: settings.coachioApiKey,
       characterRefs: refs,
     };
@@ -946,13 +961,14 @@ const App: React.FC = () => {
   };
 
   const renderCreateView = () => {
-    if (!hasGeminiKey) {
+    if (!hasAnyKey) {
       return (
         <div className="flex flex-col items-center justify-center h-full space-y-6 animate-fade-in">
           <div className="text-center space-y-2 max-w-lg">
-            <h2 className="font-hand text-4xl font-bold text-ink">Cần Gemini API Key</h2>
+            <h2 className="font-hand text-4xl font-bold text-ink">Cần API Key</h2>
             <p className="font-sans text-gray-600">
-              Tạo tiêu đề, kịch bản, voiceover và ảnh đều dùng Gemini. Vào tab <strong>Cấu hình</strong> để dán API key (lấy ở aistudio.google.com).
+              Dán <strong>Coachio API Key</strong> trong tab <strong>Cấu hình</strong> là đủ để bắt đầu (tạo tiêu đề, kịch bản, ảnh).
+              Gemini API key chỉ cần thêm nếu bạn muốn dùng phần voiceover (TTS).
             </p>
           </div>
           <Button onClick={() => setView('settings')} className="scale-125">
@@ -1043,6 +1059,8 @@ const App: React.FC = () => {
             onBack={() => setStep(AppStep.GENERATE_THUMBNAIL)}
             duration={config.duration}
             onChangeDuration={(d) => setConfig(prev => ({ ...prev, duration: d }))}
+            hasGeminiKey={hasGeminiKey}
+            onOpenSettings={() => setView('settings')}
           />
         );
       default:
@@ -1144,7 +1162,7 @@ const App: React.FC = () => {
                </button>
              </div>
 
-             {view === 'create' && hasGeminiKey && (
+             {view === 'create' && hasAnyKey && (
                  <div className="hidden lg:flex gap-4 text-sm font-sans font-semibold text-gray-500 mr-4">
                     <span className={step === AppStep.INPUT_TOPIC ? "text-ink underline decoration-2 underline-offset-4" : ""}>1. Chủ đề</span>
                     <span className="text-gray-300">→</span>

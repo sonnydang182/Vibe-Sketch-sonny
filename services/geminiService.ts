@@ -1,12 +1,23 @@
 import { GoogleGenAI, Type, Modality } from "@google/genai";
 import { Scene, Language, ImageProvider } from "../types";
-import { generateImageWithCoachio, uploadImage as coachioUpload } from "./coachioService";
+import {
+  generateImageWithCoachio,
+  uploadImage as coachioUpload,
+  coachioChat,
+  coachioChatJSON,
+} from "./coachioService";
 
 let userGeminiApiKey: string | null = null;
+let userCoachioApiKey: string | null = null;
 
 /** Set the runtime Gemini API key (called from settings). Pass empty string to clear. */
 export const setGeminiApiKey = (key: string | null | undefined) => {
   userGeminiApiKey = key && key.trim() ? key.trim() : null;
+};
+
+/** Set the runtime Coachio API key (called from settings). Pass empty string to clear. */
+export const setCoachioApiKey = (key: string | null | undefined) => {
+  userCoachioApiKey = key && key.trim() ? key.trim() : null;
 };
 
 /** Returns the active Gemini API key: user-supplied takes precedence, then env. */
@@ -15,6 +26,10 @@ export const getActiveGeminiKey = (): string | undefined => {
   const envKey = process.env.API_KEY;
   return envKey && envKey.length > 0 ? envKey : undefined;
 };
+
+/** Returns the active Coachio API key (user-supplied only — no env fallback). */
+export const getActiveCoachioKey = (): string | undefined =>
+  userCoachioApiKey || undefined;
 
 const getAI = () => new GoogleGenAI({ apiKey: getActiveGeminiKey() });
 
@@ -86,22 +101,32 @@ const LANGUAGE_CONFIG: Record<Language, {
 };
 
 /**
- * Generate Viral Titles
+ * Generate Viral Titles. Uses Coachio when its key is set, otherwise Gemini.
  */
 export const generateViralTitles = async (topic: string, tone: string, language: Language): Promise<string[]> => {
-  const ai = getAI();
   const config = LANGUAGE_CONFIG[language];
-  
+
   const prompt = `
     Act as a ${config.role}.
     Generate 5 viral YouTube titles in ${language} based on the keyword: "${topic}".
     Tone: ${tone}.
     Use strictly one of the following 3 formulas adapted for ${language} culture:
     ${config.formulas}
-    
-    Capitalize POWER WORDS. Return ONLY a JSON array of strings.
+
+    Capitalize POWER WORDS. Return ONLY a JSON array of 5 strings, like ["Title 1", "Title 2", ...].
   `;
 
+  const coachioKey = getActiveCoachioKey();
+  if (coachioKey) {
+    try {
+      return await coachioChatJSON<string[]>(coachioKey, prompt, { temperature: 0.9 });
+    } catch (error) {
+      console.error("Error generating titles (Coachio):", error);
+      return ["Error generating titles. Please try again."];
+    }
+  }
+
+  const ai = getAI();
   try {
     return await withRetry(async () => {
       const response = await ai.models.generateContent({
@@ -185,7 +210,6 @@ export const buildDurationProfile = (
  * Generate Script, Visual Descriptions and Keywords
  */
 export const generateScriptScenes = async (title: string, duration: string, language: Language): Promise<Scene[]> => {
-  const ai = getAI();
   const config = LANGUAGE_CONFIG[language];
   const profile = buildDurationProfile(duration, language);
 
@@ -227,13 +251,39 @@ export const generateScriptScenes = async (title: string, duration: string, lang
     - 'visualPrompt': clear visual metaphor (describe in English for the artist).
     - 'keywords': exact text to overlay on the image (${config.visualText}, 1-3 words max).
 
-    Return ONLY a JSON array of ${profile.targetScenes} (±3) scene objects.
+    Return ONLY a JSON array of ${profile.targetScenes} (±3) scene objects, like:
+    [{"voiceover":"...","visualPrompt":"...","keywords":"..."}, ...]
   `;
 
+  type SceneJSON = { voiceover: string; visualPrompt: string; keywords: string };
+  const toScenes = (data: SceneJSON[]): Scene[] =>
+    data.map((item, index) => ({
+      id: `scene-${index}-${Date.now()}`,
+      voiceover: item.voiceover,
+      visualPrompt: item.visualPrompt,
+      keywords: item.keywords,
+    }));
+
+  const coachioKey = getActiveCoachioKey();
+  if (coachioKey) {
+    try {
+      const data = await coachioChatJSON<SceneJSON[]>(coachioKey, prompt, {
+        temperature: 0.8,
+        // Script JSON is larger than the default — give it more headroom.
+        maxTokens: 4096,
+      });
+      return toScenes(data);
+    } catch (error) {
+      console.error("Error generating script (Coachio):", error);
+      return [];
+    }
+  }
+
+  const ai = getAI();
   try {
     return await withRetry(async () => {
       const response = await ai.models.generateContent({
-        model: "gemini-3-pro-preview", 
+        model: "gemini-3-pro-preview",
         contents: prompt,
         config: {
           responseMimeType: "application/json",
@@ -253,13 +303,7 @@ export const generateScriptScenes = async (title: string, duration: string, lang
       });
 
       if (response.text) {
-        const data = JSON.parse(response.text);
-        return data.map((item: any, index: number) => ({
-          id: `scene-${index}-${Date.now()}`,
-          voiceover: item.voiceover,
-          visualPrompt: item.visualPrompt,
-          keywords: item.keywords
-        }));
+        return toScenes(JSON.parse(response.text));
       }
       return [];
     });
@@ -588,7 +632,6 @@ export const rewriteScript = async (
   language: Language,
   options: RewriteOptions = {}
 ): Promise<string> => {
-  const ai = getAI();
   const config = LANGUAGE_CONFIG[language];
   const { minWords, maxWords, targetSeconds, context } = options;
 
@@ -647,10 +690,18 @@ ${contextBlock}
     ${currentScript}
   `;
 
-  const callOnce = async (): Promise<string> => {
+  const coachioKey = getActiveCoachioKey();
+
+  const callOnce = async (extraInstruction = ''): Promise<string> => {
+    const fullPrompt = extraInstruction ? `${prompt}\n\n${extraInstruction}` : prompt;
+    if (coachioKey) {
+      const raw = await coachioChat(coachioKey, fullPrompt, { temperature: 0.8 });
+      return stripWrappingQuotes(raw);
+    }
+    const ai = getAI();
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: prompt,
+      contents: fullPrompt,
     });
     return stripWrappingQuotes(response.text || '');
   };
@@ -660,11 +711,9 @@ ${contextBlock}
     // If the model returned the input unchanged (happens with strict prompts),
     // retry once with an explicit "must reword" suffix.
     if (result && result === stripWrappingQuotes(currentScript)) {
-      const retryResp = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: prompt + `\n\n    CRITICAL: Previous attempt returned the input unchanged. Use different words this time — synonyms, different sentence structure, or different focus.`,
-      });
-      const retry = stripWrappingQuotes(retryResp.text || '');
+      const retry = await callOnce(
+        `CRITICAL: Previous attempt returned the input unchanged. Use different words this time — synonyms, different sentence structure, or different focus.`
+      );
       if (retry && retry !== stripWrappingQuotes(currentScript)) result = retry;
     }
     return result || currentScript;
@@ -706,6 +755,9 @@ const createWavHeader = (dataLength: number, sampleRate: number = 24000) => {
  * Generate Speech using Gemini TTS
  */
 export const generateSpeech = async (text: string, language: Language): Promise<Blob | null> => {
+  if (!getActiveGeminiKey()) {
+    throw new Error("Cần Gemini API key để tạo voiceover (Coachio chưa hỗ trợ TTS).");
+  }
   const ai = getAI();
   const config = LANGUAGE_CONFIG[language];
 

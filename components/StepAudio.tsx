@@ -11,6 +11,10 @@ interface StepAudioProps {
   onBack: () => void;
   duration: GenerationConfig['duration'];
   onChangeDuration: (d: GenerationConfig['duration']) => void;
+  /** When false, the TTS controls are disabled and the user is invited to
+   *  either add a Gemini key or skip audio and export the ZIP without it. */
+  hasGeminiKey: boolean;
+  onOpenSettings: () => void;
 }
 
 const DURATIONS: GenerationConfig['duration'][] = ['Short (60s)', 'Medium (3 mins)', 'Long (5-10 mins)'];
@@ -31,6 +35,8 @@ export const StepAudio: React.FC<StepAudioProps> = ({
   onBack,
   duration,
   onChangeDuration,
+  hasGeminiKey,
+  onOpenSettings,
 }) => {
   const audioRef = useRef<HTMLAudioElement>(null);
 
@@ -78,9 +84,25 @@ export const StepAudio: React.FC<StepAudioProps> = ({
             </select>
           </label>
           <Button variant="secondary" onClick={onBack} disabled={isLoading}>Quay lại</Button>
-          <Button onClick={onExportZip} disabled={!audioUrl}>⬇ Tải ZIP</Button>
+          <Button onClick={onExportZip} disabled={!audioUrl && hasGeminiKey}>
+            {hasGeminiKey ? '⬇ Tải ZIP' : '⬇ Tải ZIP (không kèm audio)'}
+          </Button>
         </div>
       </div>
+
+      {!hasGeminiKey && (
+        <div className="flex flex-col md:flex-row md:items-center gap-3 p-4 rounded-xl border-2 border-amber-300 bg-amber-50">
+          <div className="flex-1">
+            <div className="font-hand text-lg text-amber-900">Chưa có Gemini API Key</div>
+            <div className="font-sans text-xs text-amber-800/80">
+              Coachio chưa hỗ trợ tạo voiceover (TTS). Thêm Gemini key trong Cấu hình để tạo audio, hoặc xuất ZIP không kèm audio và tự ghi voiceover sau.
+            </div>
+          </div>
+          <Button variant="secondary" onClick={onOpenSettings} className="shrink-0">
+            ⚙️ Mở Cấu hình
+          </Button>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* Left: combined script */}
@@ -145,7 +167,7 @@ export const StepAudio: React.FC<StepAudioProps> = ({
             <Button
               onClick={() => onGenerateAudio(editing ? editedScript : undefined)}
               isLoading={isLoading}
-              disabled={!scriptToUse.trim()}
+              disabled={!scriptToUse.trim() || !hasGeminiKey}
               className="w-full max-w-xs"
             >
               {audioUrl ? '🔄 Tạo Lại Giọng Đọc' : '🎙 Tạo Giọng Đọc'}

@@ -19,7 +19,7 @@ npm install
 npm run dev
 ```
 
-App chạy tại `http://localhost:5173/`. Vào tab **Cấu hình** để dán API key, hoặc đặt sẵn `GEMINI_API_KEY` trong `.env.local`.
+App chạy tại `http://localhost:5173/`. Vào tab **Cấu hình** và dán **Coachio API Key** — như vậy là đủ để chạy toàn bộ wizard tới bước thumbnail. Gemini API key chỉ cần thêm nếu muốn dùng phần voiceover (TTS); nếu không bạn vẫn có thể xuất ZIP (không kèm audio) và tự ghi voiceover sau.
 
 ## Stack
 
