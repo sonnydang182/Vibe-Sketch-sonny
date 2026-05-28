@@ -4,6 +4,8 @@ import { HistoryEntry } from '../types';
 
 interface StepHistoryProps {
   entries: HistoryEntry[];
+  /** ID of the project currently generating in the background, if any. */
+  runningId?: string | null;
   onLoad: (id: string) => void;
   onDelete: (id: string) => void;
   onClearAll: () => void;
@@ -19,7 +21,7 @@ const formatDate = (iso: string) => {
   }
 };
 
-export const StepHistory: React.FC<StepHistoryProps> = ({ entries, onLoad, onDelete, onClearAll, onCreateNew }) => {
+export const StepHistory: React.FC<StepHistoryProps> = ({ entries, runningId, onLoad, onDelete, onClearAll, onCreateNew }) => {
   return (
     <div className="flex flex-col gap-6 max-w-5xl mx-auto w-full animate-fade-in">
       <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-3">
@@ -46,16 +48,26 @@ export const StepHistory: React.FC<StepHistoryProps> = ({ entries, onLoad, onDel
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {entries.map(entry => (
+          {entries.map(entry => {
+            const isRunning = runningId === entry.id;
+            return (
             <div
               key={entry.id}
-              className="bg-white/70 backdrop-blur-sm p-4 rounded-xl border-2 border-ink/10 shadow-sm flex flex-col gap-3"
+              className={`bg-white/70 backdrop-blur-sm p-4 rounded-xl border-2 shadow-sm flex flex-col gap-3 ${
+                isRunning ? 'border-accent ring-2 ring-accent/20' : 'border-ink/10'
+              }`}
             >
-              <div className="aspect-video bg-paper border border-ink/10 rounded-lg overflow-hidden flex items-center justify-center">
+              <div className="aspect-video bg-paper border border-ink/10 rounded-lg overflow-hidden flex items-center justify-center relative">
                 {entry.thumbnailUrl ? (
                   <img src={entry.thumbnailUrl} alt={entry.topic} className="w-full h-full object-cover" />
                 ) : (
                   <span className="font-hand text-gray-400 text-lg">không có thumbnail</span>
+                )}
+                {isRunning && (
+                  <span className="absolute top-2 left-2 bg-accent text-paper text-[11px] font-hand px-2 py-0.5 rounded-full flex items-center gap-1 shadow-sm">
+                    <span className="w-1.5 h-1.5 rounded-full bg-paper animate-pulse"></span>
+                    Đang chạy
+                  </span>
                 )}
               </div>
               <div className="flex-1">
@@ -69,14 +81,19 @@ export const StepHistory: React.FC<StepHistoryProps> = ({ entries, onLoad, onDel
               </div>
               <div className="flex gap-2">
                 <Button onClick={() => onLoad(entry.id)} className="flex-1 text-sm py-1">
-                  Mở
+                  {isRunning ? 'Mở (đang chạy)' : 'Mở'}
                 </Button>
-                <Button variant="secondary" onClick={() => onDelete(entry.id)} className="text-sm py-1 px-3">
+                <Button
+                  variant="secondary"
+                  onClick={() => onDelete(entry.id)}
+                  className="text-sm py-1 px-3"
+                  disabled={isRunning}
+                >
                   Xoá
                 </Button>
               </div>
             </div>
-          ))}
+          )})}
         </div>
       )}
     </div>

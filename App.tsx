@@ -18,8 +18,21 @@ import {
   rewriteScript,
   generateSpeech,
   setGeminiApiKey,
-  getActiveGeminiKey
+  getActiveGeminiKey,
+  buildDurationProfile,
 } from './services/geminiService';
+import {
+  getCharacter,
+  loadCharacterRefAsBase64,
+  fetchCharacterRefBlob
+} from './data/characters';
+import {
+  saveProjectAssets,
+  loadProjectAssets,
+  deleteProjectAssets,
+  pruneOrphanAssets,
+  ProjectAssets,
+} from './data/assetStorage';
 
 import { StepInput } from './components/StepInput';
 import { StepTitles } from './components/StepTitles';
@@ -29,6 +42,7 @@ import { StepThumbnail } from './components/StepThumbnail';
 import { StepAudio } from './components/StepAudio';
 import { StepHistory } from './components/StepHistory';
 import { StepSettings } from './components/StepSettings';
+import { BackgroundJobBanner } from './components/BackgroundJobBanner';
 
 const SETTINGS_KEY = 'vibesketch.settings.v1';
 const HISTORY_KEY = 'vibesketch.history.v1';
@@ -46,6 +60,22 @@ const DEFAULT_CONFIG: GenerationConfig = {
   duration: 'Short (60s)',
   aspectRatio: '9:16',
   language: 'Vietnamese',
+  characters: ['stickman'],
+};
+
+/**
+ * Migrate older configs (which only stored a single `character` field) into
+ * the new `characters` array. No-op if `characters` is already present.
+ */
+const migrateConfig = (cfg: Partial<GenerationConfig> | undefined): GenerationConfig => {
+  const base = { ...DEFAULT_CONFIG, ...(cfg || {}) };
+  if (!base.characters || base.characters.length === 0) {
+    const single = (cfg as any)?.character as GenerationConfig['characters'][number] | undefined;
+    base.characters = single ? [single] : ['stickman'];
+  }
+  // Strip the deprecated single-character field so it stops re-appearing on save.
+  delete (base as any).character;
+  return base;
 };
 
 const loadSettings = (): AppSettings => {
@@ -69,11 +99,36 @@ const loadHistory = (): HistoryEntry[] => {
   }
 };
 
+/**
+ * Strip large binary fields from a HistoryEntry before persisting to
+ * localStorage. Scene images + thumbnail live in IndexedDB instead.
+ */
+const toLiteEntry = (e: HistoryEntry): HistoryEntry => ({
+  ...e,
+  thumbnailUrl: undefined,
+  scenes: e.scenes.map(s => ({ ...s, imageUrl: undefined })),
+});
+
+/**
+ * Persist history metadata to localStorage. Assets (images, thumbnails)
+ * are kept separately in IndexedDB so we never hit the quota.
+ */
 const saveHistory = (entries: HistoryEntry[]) => {
+  const lite = entries.map(toLiteEntry);
   try {
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(entries));
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(lite));
   } catch (e) {
-    console.warn('Failed to persist history (likely quota):', e);
+    // Should be rare now that assets are out, but if titles/scripts somehow
+    // exceed quota, drop oldest until it fits.
+    console.warn('Lite history exceeded quota (unexpected); trimming.', e);
+    let trimmed = lite;
+    while (trimmed.length > 0) {
+      trimmed = trimmed.slice(0, -1);
+      try {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(trimmed));
+        return;
+      } catch { /* keep trimming */ }
+    }
   }
 };
 
@@ -85,6 +140,51 @@ const App: React.FC = () => {
   const [step, setStep] = useState<AppStep>(AppStep.INPUT_TOPIC);
   const [isLoading, setIsLoading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Image generation lifecycle
+  const [isGeneratingBatch, setIsGeneratingBatch] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+
+  // Combined-audio single Blob, used by the StepAudio TTS + ZIP export.
+  // Per-scene TTS was removed because chunked TTS produces uneven tone/pacing.
+  /** Interruptible sleep — resolves either after `ms` or when signal aborts. */
+  const sleep = (ms: number, signal: AbortSignal) =>
+    new Promise<void>(resolve => {
+      const t = setTimeout(resolve, ms);
+      const onAbort = () => { clearTimeout(t); resolve(); };
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+    });
+
+  /**
+   * Silently retry an image-generation call up to `attempts` times.
+   * Treats both thrown errors and undefined responses as failures.
+   * Returns the first successful result, or throws the last error if all fail.
+   * Honours the abort signal between attempts.
+   */
+  const generateWithRetry = async <T,>(
+    fn: () => Promise<T | undefined>,
+    signal: AbortSignal,
+    attempts = 3,
+  ): Promise<T> => {
+    let lastError: unknown = null;
+    for (let i = 1; i <= attempts; i++) {
+      if (signal.aborted) throw new Error('aborted');
+      try {
+        const result = await fn();
+        if (result !== undefined && result !== null) return result;
+        lastError = new Error('AI không trả về ảnh');
+      } catch (e) {
+        lastError = e;
+        console.warn(`Generation attempt ${i}/${attempts} failed:`, e);
+      }
+      if (i < attempts && !signal.aborted) {
+        // Short backoff: 1.2s, 2.4s
+        await sleep(1200 * i, signal);
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  };
 
   // Settings (persisted)
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
@@ -113,6 +213,7 @@ const App: React.FC = () => {
   // Thumbnail
   const [thumbnailUrl, setThumbnailUrl] = useState<string | undefined>(undefined);
   const [isGeneratingThumbnail, setIsGeneratingThumbnail] = useState(false);
+  const [thumbnailError, setThumbnailError] = useState<string | undefined>(undefined);
 
   // Push Gemini key into the service module whenever settings change.
   useEffect(() => {
@@ -155,26 +256,41 @@ const App: React.FC = () => {
         timestamp: new Date().toISOString(),
         topic: config.topic,
         selectedTitle,
-        thumbnailUrl,
+        thumbnailUrl,           // Will be stripped before localStorage write
         config,
         titles,
-        scenes: scenes.map(s => ({ ...s, isGeneratingImage: false })),
+        scenes: scenes.map(s => ({
+          ...s,
+          isGeneratingImage: false,
+          isGeneratingAudio: false,
+          audioUrl: undefined,
+          audioError: undefined,
+          audioForText: undefined,
+          error: undefined,
+        })),
         fullScript,
         step,
         lastGeneratedTopic,
         lastGeneratedTitleId,
       };
 
+      // Update in-memory history (full, including images for the active project).
       setHistory(prev => {
         const idx = prev.findIndex(p => p.id === id);
         const next = idx >= 0
           ? [...prev.slice(0, idx), entry, ...prev.slice(idx + 1)]
           : [entry, ...prev];
-        // Keep newest 50
-        const trimmed = next.slice(0, 50);
-        saveHistory(trimmed);
+        const trimmed = next.slice(0, 30);
+        saveHistory(trimmed); // saves a lite copy (no images) to localStorage
         return trimmed;
       });
+
+      // Persist images + thumbnail to IndexedDB so they survive F5.
+      const sceneImages: Record<string, string> = {};
+      scenes.forEach(s => {
+        if (s.imageUrl) sceneImages[s.id] = s.imageUrl;
+      });
+      saveProjectAssets(id, { sceneImages, thumbnailUrl });
 
       if (!activeProjectId) setActiveProjectId(id);
     }, 800);
@@ -182,14 +298,44 @@ const App: React.FC = () => {
     return () => clearTimeout(timer);
   }, [config, titles, scenes, thumbnailUrl, fullScript, step, lastGeneratedTopic, lastGeneratedTitleId, activeProjectId]);
 
+  // On mount, hydrate the active project's assets from IndexedDB so a refresh
+  // doesn't lose generated images. We do this once when the activeProjectId is
+  // first known.
+  const hydratedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!activeProjectId || hydratedRef.current.has(activeProjectId)) return;
+    hydratedRef.current.add(activeProjectId);
+    (async () => {
+      const assets = await loadProjectAssets(activeProjectId);
+      if (!assets) return;
+      if (assets.thumbnailUrl) {
+        // Only hydrate if we don't already have one in memory.
+        setThumbnailUrl(prev => prev ?? assets.thumbnailUrl);
+      }
+      if (Object.keys(assets.sceneImages).length > 0) {
+        setScenes(prev =>
+          prev.map(s => (s.imageUrl || !assets.sceneImages[s.id]
+            ? s
+            : { ...s, imageUrl: assets.sceneImages[s.id] }))
+        );
+      }
+    })();
+  }, [activeProjectId]);
+
   // --- DASHBOARD NAV ---
   const startNewProject = () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setIsGeneratingBatch(false);
+    setIsGeneratingThumbnail(false);
     setActiveProjectId(null);
     setConfig(DEFAULT_CONFIG);
     setTitles([]);
     setScenes([]);
     setFullScript('');
     setThumbnailUrl(undefined);
+    setThumbnailError(undefined);
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
     setAudioUrl(undefined);
     setAudioBlob(null);
     setLastGeneratedTopic('');
@@ -201,11 +347,28 @@ const App: React.FC = () => {
   const loadFromHistory = (id: string) => {
     const entry = history.find(h => h.id === id);
     if (!entry) return;
+
+    // Abort any in-flight image generation from the previous project.
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setIsGeneratingBatch(false);
+    setIsGeneratingThumbnail(false);
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+
     setActiveProjectId(entry.id);
-    setConfig(entry.config);
+    setConfig(migrateConfig(entry.config));
     setTitles(entry.titles || []);
-    setScenes((entry.scenes || []).map(s => ({ ...s, isGeneratingImage: false })));
-    setThumbnailUrl(entry.thumbnailUrl);
+    setScenes((entry.scenes || []).map(s => ({
+      ...s,
+      isGeneratingImage: false,
+      isGeneratingAudio: false,
+      audioUrl: undefined,
+      audioError: undefined,
+      audioForText: undefined,
+      error: undefined,
+    })));
+    setThumbnailUrl(entry.thumbnailUrl); // May be undefined for lite entries
+    setThumbnailError(undefined);
     setFullScript(entry.fullScript || '');
     setLastGeneratedTopic(entry.lastGeneratedTopic || entry.config.topic);
     setLastGeneratedTitleId(entry.lastGeneratedTitleId || '');
@@ -213,6 +376,18 @@ const App: React.FC = () => {
     setAudioBlob(null);
     setStep(entry.step ?? AppStep.INPUT_TOPIC);
     setView('create');
+
+    // Async hydrate images from IndexedDB
+    (async () => {
+      const assets = await loadProjectAssets(entry.id);
+      if (!assets) return;
+      if (assets.thumbnailUrl) setThumbnailUrl(assets.thumbnailUrl);
+      if (Object.keys(assets.sceneImages).length > 0) {
+        setScenes(prev =>
+          prev.map(s => ({ ...s, imageUrl: assets.sceneImages[s.id] ?? s.imageUrl }))
+        );
+      }
+    })();
   };
 
   const deleteFromHistory = (id: string) => {
@@ -221,21 +396,60 @@ const App: React.FC = () => {
       saveHistory(next);
       return next;
     });
-    if (activeProjectId === id) {
-      setActiveProjectId(null);
-    }
+    if (activeProjectId === id) setActiveProjectId(null);
+    deleteProjectAssets(id);
   };
 
   const clearAllHistory = () => {
     if (!confirm('Xoá toàn bộ lịch sử?')) return;
+    const idsToDelete = history.map(h => h.id);
     setHistory([]);
     saveHistory([]);
     setActiveProjectId(null);
+    Promise.all(idsToDelete.map(deleteProjectAssets));
   };
 
-  const imageProviderOpts = {
-    provider: settings.imageProvider,
-    coachioApiKey: settings.coachioApiKey,
+  // Prune orphan IDB entries on first load (best-effort cleanup).
+  useEffect(() => {
+    pruneOrphanAssets(new Set(history.map(h => h.id)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /**
+   * Build per-call image generation options for the active cast (1-3 chars).
+   * Empty / all-stickman casts return characterRefs=[] so the prompt falls
+   * back to the classic stickman style.
+   */
+  const buildImageOpts = async () => {
+    const ids = config.characters?.length ? config.characters : ['stickman' as const];
+    const refs = await Promise.all(ids.map(async (id) => {
+      const c = getCharacter(id);
+      if (c.id === 'stickman') {
+        return {
+          isStickman: true,
+          styleHint: c.styleHint,
+          personalityHint: c.personalityHint,
+          label: c.labels[config.language],
+        };
+      }
+      const [inline, blob] = await Promise.all([
+        loadCharacterRefAsBase64(c.id),
+        fetchCharacterRefBlob(c.id),
+      ]);
+      return {
+        inline: inline || undefined,
+        blob: blob || undefined,
+        styleHint: c.styleHint,
+        personalityHint: c.personalityHint,
+        label: c.labels[config.language],
+      };
+    }));
+
+    return {
+      provider: settings.imageProvider,
+      coachioApiKey: settings.coachioApiKey,
+      characterRefs: refs,
+    };
   };
 
   // --- IMPORT / EXPORT LOGIC ---
@@ -283,17 +497,32 @@ const App: React.FC = () => {
 
         if (data && data.state) {
           const s = data.state;
+          abortRef.current?.abort();
+          abortRef.current = null;
+          setIsGeneratingBatch(false);
+          setIsGeneratingThumbnail(false);
+          if (audioUrl) URL.revokeObjectURL(audioUrl);
+
           setActiveProjectId(null); // imported = new project entry
-          setConfig(s.config);
+          setConfig(migrateConfig(s.config));
           setTitles(s.titles || []);
-          setScenes((s.scenes || []).map((sc: Scene) => ({ ...sc, isGeneratingImage: false })));
+          setScenes((s.scenes || []).map((sc: Scene) => ({
+            ...sc,
+            isGeneratingImage: false,
+            isGeneratingAudio: false,
+            audioUrl: undefined,
+            audioError: undefined,
+            audioForText: undefined,
+            error: undefined,
+          })));
           setThumbnailUrl(s.thumbnailUrl);
-          setLastGeneratedTopic(s.lastGeneratedTopic || s.config.topic);
+          setThumbnailError(undefined);
+          setLastGeneratedTopic(s.lastGeneratedTopic || s.config?.topic || '');
           setLastGeneratedTitleId(s.lastGeneratedTitleId || '');
           setFullScript(s.fullScript || '');
           setAudioUrl(undefined);
           setAudioBlob(null);
-          setStep(s.step);
+          setStep(s.step ?? AppStep.INPUT_TOPIC);
           setView('create');
           alert("Đã tải dự án thành công!");
         } else {
@@ -355,33 +584,98 @@ const App: React.FC = () => {
     }
   };
 
+  const handleStopGeneration = () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setIsGeneratingBatch(false);
+    setIsGeneratingThumbnail(false);
+    // Clear any per-scene spinner state
+    setScenes(prev => prev.map(s => ({ ...s, isGeneratingImage: false })));
+  };
+
+  /** Max number of scene-image requests in flight at once. */
+  const MAX_CONCURRENT = 5;
+
   const handleStartVisualGeneration = async () => {
     setStep(AppStep.GENERATE_VISUALS);
 
-    for (const scene of scenes) {
-        if (!scene.imageUrl) {
-            setScenes(prev => prev.map(s => s.id === scene.id ? { ...s, isGeneratingImage: true } : s));
-            try {
-                const imageUrl = await generateDoodleImage(scene.visualPrompt, scene.keywords, config.aspectRatio, config.language, imageProviderOpts);
-                setScenes(prev => prev.map(s => s.id === scene.id ? { ...s, imageUrl, isGeneratingImage: false } : s));
-                await new Promise(r => setTimeout(r, 2000));
-            } catch (e: any) {
-                console.error(`Error generating scene ${scene.id}`, e);
-                setScenes(prev => prev.map(s => s.id === scene.id ? { ...s, isGeneratingImage: false } : s));
-            }
+    // Build image opts ONCE for the whole batch — character ref is the same
+    // for all scenes, so we don't need to re-fetch it per scene.
+    const opts = await buildImageOpts();
+
+    const ac = new AbortController();
+    abortRef.current = ac;
+    setIsGeneratingBatch(true);
+
+    // Snapshot scenes to process. We pull from this queue with N workers
+    // so up to MAX_CONCURRENT requests run in parallel.
+    const todo = scenes.filter(s => !s.imageUrl);
+    let nextIdx = 0;
+
+    const processOne = async (scene: Scene) => {
+      if (ac.signal.aborted) return;
+      setScenes(prev => prev.map(s => s.id === scene.id ? { ...s, isGeneratingImage: true, error: undefined } : s));
+
+      try {
+        const imageUrl = await generateWithRetry(
+          () => generateDoodleImage(scene.visualPrompt, scene.keywords, config.aspectRatio, config.language, opts),
+          ac.signal,
+        );
+        if (ac.signal.aborted) {
+          setScenes(prev => prev.map(s => s.id === scene.id ? { ...s, isGeneratingImage: false } : s));
+          return;
         }
+        setScenes(prev => prev.map(s => s.id === scene.id ? { ...s, imageUrl, isGeneratingImage: false, error: undefined } : s));
+      } catch (e: any) {
+        console.error(`Error generating scene ${scene.id} after retries`, e);
+        const msg = (e?.message || String(e)).slice(0, 200);
+        setScenes(prev => prev.map(s => s.id === scene.id ? { ...s, isGeneratingImage: false, error: msg } : s));
+      }
+    };
+
+    const worker = async () => {
+      while (true) {
+        if (ac.signal.aborted) return;
+        const i = nextIdx++;
+        if (i >= todo.length) return;
+        await processOne(todo[i]);
+      }
+    };
+
+    const workerCount = Math.min(MAX_CONCURRENT, todo.length);
+    try {
+      await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    } finally {
+      if (abortRef.current === ac) abortRef.current = null;
+      setIsGeneratingBatch(false);
     }
   };
 
   const handleRegenerateImage = async (id: string, prompt: string, keywords: string) => {
-    setScenes(prev => prev.map(s => s.id === id ? { ...s, isGeneratingImage: true } : s));
+    // Single-scene regen — share the abort controller so the Stop button works here too.
+    const ac = abortRef.current ?? new AbortController();
+    abortRef.current = ac;
+    setIsGeneratingBatch(true);
+    setScenes(prev => prev.map(s => s.id === id ? { ...s, isGeneratingImage: true, error: undefined } : s));
+
     try {
-        const imageUrl = await generateDoodleImage(prompt, keywords, config.aspectRatio, config.language, imageProviderOpts);
-        setScenes(prev => prev.map(s => s.id === id ? { ...s, imageUrl, isGeneratingImage: false } : s));
-    } catch (e) {
-        console.error(e);
-        alert("Lỗi tạo ảnh. Kiểm tra lại API key hoặc thử lại sau.");
-        setScenes(prev => prev.map(s => s.id === id ? { ...s, isGeneratingImage: false } : s));
+        const opts = await buildImageOpts();
+        const imageUrl = await generateWithRetry(
+          () => generateDoodleImage(prompt, keywords, config.aspectRatio, config.language, opts),
+          ac.signal,
+        );
+        if (ac.signal.aborted) {
+          setScenes(prev => prev.map(s => s.id === id ? { ...s, isGeneratingImage: false } : s));
+          return;
+        }
+        setScenes(prev => prev.map(s => s.id === id ? { ...s, imageUrl, isGeneratingImage: false, error: undefined } : s));
+    } catch (e: any) {
+        console.error('Regenerate failed after retries', e);
+        const msg = (e?.message || String(e)).slice(0, 200);
+        setScenes(prev => prev.map(s => s.id === id ? { ...s, isGeneratingImage: false, error: msg } : s));
+    } finally {
+        if (abortRef.current === ac) abortRef.current = null;
+        setIsGeneratingBatch(false);
     }
   };
 
@@ -392,60 +686,204 @@ const App: React.FC = () => {
       }
   };
 
-  const handleGenerateThumbnail = async () => {
+  const handleGenerateThumbnail = async (customPrompt?: string) => {
+      const ac = new AbortController();
+      abortRef.current = ac;
       setIsGeneratingThumbnail(true);
+      setThumbnailError(undefined);
       const selectedTitle = titles.find(t => t.selected);
-      const visualMetaphor = scenes.length > 0 ? scenes[0].visualPrompt : "";
+      const visualMetaphor = customPrompt && customPrompt.trim()
+        ? customPrompt.trim()
+        : (scenes.length > 0 ? scenes[0].visualPrompt : "");
 
       try {
-          const url = await generateThumbnailImage(
-            selectedTitle?.text || config.topic,
-            visualMetaphor,
-            config.aspectRatio,
-            imageProviderOpts
+          const opts = await buildImageOpts();
+          const url = await generateWithRetry(
+            () => generateThumbnailImage(
+              selectedTitle?.text || config.topic,
+              visualMetaphor,
+              config.aspectRatio,
+              opts
+            ),
+            ac.signal,
           );
+          if (ac.signal.aborted) return;
           setThumbnailUrl(url);
-      } catch (e) {
-          console.error(e);
-          alert("Lỗi tạo thumbnail.");
+          setThumbnailError(undefined);
+      } catch (e: any) {
+          console.error('Thumbnail failed after retries', e);
+          if (!ac.signal.aborted) {
+            const msg = (e?.message || String(e)).slice(0, 200);
+            setThumbnailError(msg);
+          }
       } finally {
+          if (abortRef.current === ac) abortRef.current = null;
           setIsGeneratingThumbnail(false);
       }
   };
 
-  // --- AUDIO LOGIC ---
+  // --- PER-SCENE VOICEOVER ---
 
-  const handleMoveToAudio = () => {
-    setStep(AppStep.GENERATE_AUDIO);
-    if (!fullScript) {
-      const combined = scenes.map(s => s.voiceover).join(' ');
-      setFullScript(combined);
-    }
+  /**
+   * Per-scene word budget driven by the duration profile (not by scenes.length).
+   * This means: when user picks "3 mins" later, the budget instantly tells
+   * the AI to make each scene LONGER instead of trying to add more scenes.
+   *
+   * `numScenes` arg is kept only for backward compat with existing call sites;
+   * the budget itself comes from the profile.
+   */
+  const computeMaxWordsPerScene = (_numScenes: number) => {
+    const profile = buildDurationProfile(config.duration, config.language);
+    return {
+      minWords: profile.wordsPerScene.min,
+      maxWords: profile.wordsPerScene.max,
+      perSceneSeconds: profile.secsPerScene,
+      targetScenes: profile.targetScenes,
+    };
   };
 
-  const handleRewriteScript = async (mode: 'longer' | 'shorter') => {
+  const pushVoiceoverVariant = (prev: Scene, newText: string): Scene => ({
+    ...prev,
+    voiceover: newText,
+    // Keep 3 latest old versions, skip duplicates
+    voiceoverVariants: [
+      prev.voiceover,
+      ...(prev.voiceoverVariants || []).filter(v => v !== prev.voiceover),
+    ].filter(v => v && v !== newText).slice(0, 3),
+  });
+
+  /** Build the scene-context block for rewriteScript so the rewrite stays
+   *  on-topic and flows with adjacent scenes. */
+  const buildSceneRewriteContext = (sceneIdx: number) => {
+    const cur = scenes[sceneIdx];
+    if (!cur) return undefined;
+    return {
+      visualPrompt: cur.visualPrompt,
+      keywords: cur.keywords,
+      prevVoiceover: scenes[sceneIdx - 1]?.voiceover,
+      nextVoiceover: scenes[sceneIdx + 1]?.voiceover,
+    };
+  };
+
+  const handleRewriteSceneVoiceover = async (id: string, mode: 'longer' | 'shorter') => {
+    const idx = scenes.findIndex(s => s.id === id);
+    if (idx < 0) return;
+    const scene = scenes[idx];
+    const { minWords, maxWords, perSceneSeconds } = computeMaxWordsPerScene(scenes.length);
     setIsRewriting(true);
     try {
-      const newText = await rewriteScript(fullScript, mode, config.language);
-      setFullScript(newText);
+      const newText = await rewriteScript(scene.voiceover, mode, config.language, {
+        minWords,
+        maxWords,
+        targetSeconds: perSceneSeconds,
+        context: buildSceneRewriteContext(idx),
+      });
+      const trimmed = (newText || '').trim();
+      if (!trimmed || trimmed === scene.voiceover.trim()) {
+        // No change — surface to the user so the loading state doesn't feel broken.
+        console.warn('Rewrite returned no change for scene', id);
+        return;
+      }
+      setScenes(prev => prev.map(s => s.id === id ? pushVoiceoverVariant(s, trimmed) : s));
     } catch (e) {
-      alert("Lỗi viết lại kịch bản.");
+      console.error(e);
+      alert("Lỗi viết lại lời dẫn.");
     } finally {
       setIsRewriting(false);
     }
   };
 
-  const handleGenerateAudio = async () => {
+  /** Rewrite every scene's voiceover in parallel (worker pool of 3). */
+  const handleRewriteAllVoiceovers = async (mode: 'longer' | 'shorter') => {
+    const { minWords, maxWords, perSceneSeconds } = computeMaxWordsPerScene(scenes.length);
+    // Snapshot the index map so context (prev/next) is computed against the
+    // ORIGINAL voiceovers, not the in-progress rewritten ones.
+    const snapshot = scenes.map(s => ({ ...s }));
+    const targets = snapshot.map((_, i) => i);
+    let nextIdx = 0;
+    setIsRewriting(true);
+
+    const worker = async () => {
+      while (true) {
+        const wi = nextIdx++;
+        if (wi >= targets.length) return;
+        const sceneIdx = targets[wi];
+        const scene = snapshot[sceneIdx];
+        if (!scene || !scene.voiceover.trim()) continue;
+        try {
+          const newText = await rewriteScript(scene.voiceover, mode, config.language, {
+            minWords,
+            maxWords,
+            targetSeconds: perSceneSeconds,
+            context: {
+              visualPrompt: scene.visualPrompt,
+              keywords: scene.keywords,
+              prevVoiceover: snapshot[sceneIdx - 1]?.voiceover,
+              nextVoiceover: snapshot[sceneIdx + 1]?.voiceover,
+            },
+          });
+          const trimmed = (newText || '').trim();
+          if (trimmed && trimmed !== scene.voiceover.trim()) {
+            setScenes(prev => prev.map(s => s.id === scene.id ? pushVoiceoverVariant(s, trimmed) : s));
+          }
+        } catch (e) {
+          console.warn(`Bulk rewrite failed for scene ${scene.id}`, e);
+        }
+      }
+    };
+
+    try {
+      await Promise.all(Array.from({ length: Math.min(3, targets.length) }, () => worker()));
+    } finally {
+      setIsRewriting(false);
+    }
+  };
+
+  const handleEditSceneVoiceover = (id: string, text: string) => {
+    setScenes(prev => prev.map(s => {
+      if (s.id !== id) return s;
+      const trimmed = text;
+      if (trimmed === s.voiceover) return s;
+      return pushVoiceoverVariant(s, trimmed);
+    }));
+  };
+
+  const handleRevertSceneVoiceover = (id: string, variantIdx: number) => {
+    setScenes(prev => prev.map(s => {
+      if (s.id !== id) return s;
+      const v = s.voiceoverVariants?.[variantIdx];
+      if (!v) return s;
+      return pushVoiceoverVariant(s, v);
+    }));
+  };
+
+  // --- COMBINED AUDIO (TTS for the whole script in one pass) ---
+
+  const handleMoveToAudio = () => {
+    setStep(AppStep.GENERATE_AUDIO);
+  };
+
+  const handleGenerateAudio = async (overrideScript?: string) => {
+    // Always start from the live derived script so it picks up the latest
+    // voiceover edits made in StepVisuals.
+    const text = (overrideScript && overrideScript.trim())
+      ? overrideScript.trim()
+      : scenes.map(s => s.voiceover).filter(Boolean).join(' ');
+
+    if (!text.trim()) {
+      alert("Chưa có lời dẫn để tạo audio.");
+      return;
+    }
+
     setIsLoading(true);
     try {
-      if (audioUrl) {
-        URL.revokeObjectURL(audioUrl);
-      }
-      const blob = await generateSpeech(fullScript, config.language);
+      if (audioUrl) URL.revokeObjectURL(audioUrl);
+      const blob = await generateSpeech(text, config.language);
       if (blob) {
         setAudioBlob(blob);
         const url = URL.createObjectURL(blob);
         setAudioUrl(url);
+        setFullScript(text);
       } else {
         alert("Không thể tạo âm thanh. Thử lại sau.");
       }
@@ -459,50 +897,51 @@ const App: React.FC = () => {
 
   const handleExportZip = async () => {
     const zip = new JSZip();
-    const folderName = config.topic.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+    const folderName = config.topic.replace(/[^a-z0-9]/gi, '_').toLowerCase() || 'project';
     const folder = zip.folder(folderName);
-
     if (!folder) return;
 
+    // 1. Script + metadata
     let scriptContent = `TITLE: ${titles.find(t=>t.selected)?.text}\n`;
     scriptContent += `LANGUAGE: ${config.language}\n`;
-    scriptContent += `ASPECT RATIO: ${config.aspectRatio}\n\n`;
-    scriptContent += `--- FULL VOICEOVER SCRIPT ---\n${fullScript}\n\n`;
+    scriptContent += `ASPECT RATIO: ${config.aspectRatio}\n`;
+    scriptContent += `DURATION: ${config.duration}\n\n`;
+    const derivedFullScript = scenes.map(s => s.voiceover).join(' ');
+    scriptContent += `--- FULL VOICEOVER ---\n${derivedFullScript}\n\n`;
     scriptContent += `--- SCENES ---\n`;
     scenes.forEach((scene, idx) => {
-        scriptContent += `SCENE ${idx + 1} (${scene.keywords}):\nVOICEOVER: ${scene.voiceover}\nPROMPT: ${scene.visualPrompt}\n\n`;
+      scriptContent += `SCENE ${idx + 1} (${scene.keywords}):\nVOICEOVER: ${scene.voiceover}\nPROMPT: ${scene.visualPrompt}\n\n`;
     });
     folder.file("script.txt", scriptContent);
 
+    // 2. Images
     scenes.forEach((scene, idx) => {
-        if (scene.imageUrl && scene.imageUrl.startsWith('data:')) {
-            const base64Data = scene.imageUrl.split(',')[1];
-            folder.file(`scene_${idx + 1}.png`, base64Data, { base64: true });
-        }
+      if (scene.imageUrl && scene.imageUrl.startsWith('data:')) {
+        const base64Data = scene.imageUrl.split(',')[1];
+        folder.file(`scene_${String(idx + 1).padStart(2, '0')}.png`, base64Data, { base64: true });
+      }
     });
-
     if (thumbnailUrl && thumbnailUrl.startsWith('data:')) {
-        const base64Data = thumbnailUrl.split(',')[1];
-        folder.file("thumbnail.png", base64Data, { base64: true });
+      const base64Data = thumbnailUrl.split(',')[1];
+      folder.file("thumbnail.png", base64Data, { base64: true });
     }
 
-    if (audioBlob) {
-      folder.file("voiceover.wav", audioBlob);
-    }
+    // 3. Combined voiceover (single file)
+    if (audioBlob) folder.file("voiceover.wav", audioBlob);
 
     try {
-        const content = await zip.generateAsync({ type: "blob" });
-        const url = window.URL.createObjectURL(content);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `${folderName}_vibe_project.zip`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        window.URL.revokeObjectURL(url);
+      const content = await zip.generateAsync({ type: "blob" });
+      const url = window.URL.createObjectURL(content);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${folderName}_vibe_project.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
     } catch (e) {
-        console.error("Error creating zip", e);
-        alert("Có lỗi khi nén file.");
+      console.error("Error creating zip", e);
+      alert("Có lỗi khi nén file.");
     }
   };
 
@@ -558,9 +997,21 @@ const App: React.FC = () => {
           <StepVisuals
             scenes={scenes}
             regenerateImage={handleRegenerateImage}
+            regenerateAllFailures={handleStartVisualGeneration}
             onNext={handleMoveToThumbnail}
             onBack={() => setStep(AppStep.REVIEW_SCRIPT)}
             aspectRatio={config.aspectRatio}
+            language={config.language}
+            isGeneratingBatch={isGeneratingBatch}
+            onStop={handleStopGeneration}
+            onRewriteVoiceover={handleRewriteSceneVoiceover}
+            onRewriteAllVoiceovers={handleRewriteAllVoiceovers}
+            onEditVoiceover={handleEditSceneVoiceover}
+            onRevertVoiceover={handleRevertSceneVoiceover}
+            isRewriting={isRewriting}
+            perSceneBudget={computeMaxWordsPerScene(scenes.length)}
+            duration={config.duration}
+            onChangeDuration={(d) => setConfig(prev => ({ ...prev, duration: d }))}
           />
         );
       case AppStep.GENERATE_THUMBNAIL:
@@ -568,24 +1019,30 @@ const App: React.FC = () => {
             <StepThumbnail
                 thumbnailUrl={thumbnailUrl}
                 isGenerating={isGeneratingThumbnail}
+                error={thumbnailError}
                 onRegenerate={handleGenerateThumbnail}
+                onStop={handleStopGeneration}
                 onExportZip={handleMoveToAudio}
                 onBack={() => setStep(AppStep.GENERATE_VISUALS)}
                 aspectRatio={config.aspectRatio}
+                language={config.language}
+                defaultCustomPrompt={
+                  scenes.length > 0 ? scenes[0].visualPrompt :
+                  (titles.find(t => t.selected)?.text || config.topic)
+                }
             />
         );
       case AppStep.GENERATE_AUDIO:
         return (
           <StepAudio
-            script={fullScript}
-            setScript={setFullScript}
+            scenes={scenes}
             audioUrl={audioUrl}
+            isLoading={isLoading}
             onGenerateAudio={handleGenerateAudio}
-            onRewrite={handleRewriteScript}
             onExportZip={handleExportZip}
             onBack={() => setStep(AppStep.GENERATE_THUMBNAIL)}
-            isLoading={isLoading}
-            isRewriting={isRewriting}
+            duration={config.duration}
+            onChangeDuration={(d) => setConfig(prev => ({ ...prev, duration: d }))}
           />
         );
       default:
@@ -595,9 +1052,11 @@ const App: React.FC = () => {
 
   const renderContent = () => {
     if (view === 'history') {
+      const isRunning = isGeneratingBatch || isGeneratingThumbnail;
       return (
         <StepHistory
           entries={history}
+          runningId={isRunning ? activeProjectId : null}
           onLoad={loadFromHistory}
           onDelete={deleteFromHistory}
           onClearAll={clearAllHistory}
@@ -619,9 +1078,10 @@ const App: React.FC = () => {
   const NavButton: React.FC<{ id: DashboardView; label: string; icon: React.ReactNode }> = ({ id, label, icon }) => (
     <button
       onClick={() => {
-        if (id === 'create' && view !== 'create') {
-          // Returning to create — keep current project
-          setView('create');
+        // "Tạo mới" always starts a fresh project — current work is preserved
+        // in History via auto-save and can be resumed by clicking it there.
+        if (id === 'create') {
+          startNewProject();
         } else {
           setView(id);
         }
@@ -712,6 +1172,23 @@ const App: React.FC = () => {
       <main className="flex-1 flex flex-col items-center justify-start p-6 md:p-12 w-full">
         {renderContent()}
       </main>
+
+      <BackgroundJobBanner
+        visible={isGeneratingBatch || isGeneratingThumbnail}
+        message={(() => {
+          if (isGeneratingThumbnail) return 'Đang thiết kế thumbnail...';
+          const done = scenes.filter(s => s.imageUrl).length;
+          const total = scenes.length;
+          if (total > 0) return `Đang vẽ cảnh ${Math.min(done + 1, total)}/${total}...`;
+          return 'Đang tạo ảnh...';
+        })()}
+        progress={(() => {
+          if (isGeneratingThumbnail || scenes.length === 0) return null;
+          return scenes.filter(s => s.imageUrl).length / scenes.length;
+        })()}
+        onStop={handleStopGeneration}
+        onGoToBatch={view !== 'create' ? () => setView('create') : undefined}
+      />
     </div>
   );
 };

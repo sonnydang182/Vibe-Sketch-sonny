@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import { Button } from './Button';
-import { GenerationConfig, Language } from '../types';
+import { GenerationConfig, Language, CharacterId } from '../types';
 import { TopicSuggestionsModal } from './TopicSuggestionsModal';
+import { CharacterPickerModal } from './CharacterPickerModal';
+import { getCharacter, CharacterDef } from '../data/characters';
 
 interface StepInputProps {
   config: GenerationConfig;
@@ -12,8 +14,11 @@ interface StepInputProps {
 
 export const StepInput: React.FC<StepInputProps> = ({ config, setConfig, onNext, isLoading }) => {
   const [suggestOpen, setSuggestOpen] = useState(false);
+  const [characterOpen, setCharacterOpen] = useState(false);
   const durations = ['Short (60s)', 'Medium (3 mins)', 'Long (5-10 mins)'] as const;
   const tones = ['Stoic', 'Motivational', 'Dark Philosophy', 'Humorous'] as const;
+  const characterIds: CharacterId[] = config.characters?.length ? config.characters : ['stickman'];
+  const pickedCharacters: CharacterDef[] = characterIds.map(id => getCharacter(id));
   
   const languages: { id: Language; label: string; flag: string }[] = [
       { id: 'Vietnamese', label: 'Tiếng Việt', flag: '🇻🇳' },
@@ -159,6 +164,57 @@ export const StepInput: React.FC<StepInputProps> = ({ config, setConfig, onNext,
             </div>
         </div>
 
+        {/* Characters (1-3) */}
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <label className="font-hand text-2xl text-ink block">
+              {config.language === 'English' ? `Characters (${characterIds.length})` :
+               config.language === 'Japanese' ? `キャラクター (${characterIds.length})` :
+               `Nhân vật (${characterIds.length})`}
+            </label>
+            <span className="font-sans text-xs text-gray-500">
+              {config.language === 'English' ? 'Up to 3' :
+               config.language === 'Japanese' ? '最大3人' :
+               'Tối đa 3'}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setCharacterOpen(true)}
+            className="w-full flex items-center gap-3 p-3 rounded-lg border-2 border-gray-300 hover:border-ink bg-white/70 hover:bg-white transition-colors text-left group"
+          >
+            <div className="flex items-center gap-2 shrink-0">
+              {pickedCharacters.map((c, i) => (
+                <div key={i} className="relative w-16 h-16 rounded-lg bg-paper border-2 border-ink/10 flex items-center justify-center overflow-hidden">
+                  {c.thumbUrl ? (
+                    <img src={c.thumbUrl} alt={c.labels[config.language]} className="w-full h-full object-contain" />
+                  ) : (
+                    <span className="font-hand text-xs text-gray-400">—</span>
+                  )}
+                  <span className="absolute top-0 left-0 bg-ink text-paper text-[9px] font-hand px-1 rounded-br">{i + 1}</span>
+                </div>
+              ))}
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="font-hand text-base text-ink leading-tight line-clamp-1">
+                {pickedCharacters.map((c, i) =>
+                  c.index === 0 ? `★ ${c.labels[config.language]}` : `${c.index}. ${c.labels[config.language]}`
+                ).join(' · ')}
+              </div>
+              <div className="font-sans text-xs text-gray-500 mt-0.5 line-clamp-1">
+                {config.language === 'English' ? 'Click to manage cast — pick 1, 2 or 3 characters' :
+                 config.language === 'Japanese' ? 'クリックで編成 — 1〜3人選べます' :
+                 'Click để chỉnh — chọn 1, 2 hoặc 3 nhân vật'}
+              </div>
+            </div>
+            <span className="font-hand text-base px-3 py-1 rounded-full border-2 border-ink/40 text-ink bg-white shadow-sm group-hover:border-ink shrink-0">
+              {config.language === 'English' ? 'EDIT' :
+               config.language === 'Japanese' ? '編集' :
+               'CHỈNH'}
+            </span>
+          </button>
+        </div>
+
         <Button
           onClick={onNext}
           disabled={!config.topic}
@@ -176,6 +232,14 @@ export const StepInput: React.FC<StepInputProps> = ({ config, setConfig, onNext,
         language={config.language}
         onClose={() => setSuggestOpen(false)}
         onPick={(t) => setConfig({ ...config, topic: t })}
+      />
+
+      <CharacterPickerModal
+        open={characterOpen}
+        language={config.language}
+        characters={characterIds}
+        onClose={() => setCharacterOpen(false)}
+        onChange={(next) => setConfig({ ...config, characters: next })}
       />
     </div>
   );

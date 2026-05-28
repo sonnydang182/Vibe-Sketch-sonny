@@ -1,24 +1,37 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Button } from './Button';
+import { Language } from '../types';
+import { CustomPromptModal } from './CustomPromptModal';
 
 interface StepThumbnailProps {
   thumbnailUrl?: string;
   isGenerating: boolean;
-  onRegenerate: () => void;
+  /** Error message from last failed attempt — shown if no thumbnail yet. */
+  error?: string;
+  onRegenerate: (customPrompt?: string) => void;
+  onStop: () => void;
   onExportZip: () => void;
   onBack: () => void;
   aspectRatio: '16:9' | '9:16';
+  language: Language;
+  /** Default prompt shown in the custom modal — usually the title or visual metaphor. */
+  defaultCustomPrompt?: string;
 }
 
-export const StepThumbnail: React.FC<StepThumbnailProps> = ({ 
-  thumbnailUrl, 
-  isGenerating, 
-  onRegenerate, 
-  onExportZip, 
+export const StepThumbnail: React.FC<StepThumbnailProps> = ({
+  thumbnailUrl,
+  isGenerating,
+  error,
+  onRegenerate,
+  onStop,
+  onExportZip,
   onBack,
-  aspectRatio
+  aspectRatio,
+  language,
+  defaultCustomPrompt = '',
 }) => {
-    
+  const [customOpen, setCustomOpen] = useState(false);
+
   const downloadImage = (dataUrl: string, filename: string) => {
     const a = document.createElement('a');
     a.href = dataUrl;
@@ -27,8 +40,9 @@ export const StepThumbnail: React.FC<StepThumbnailProps> = ({
     a.click();
     document.body.removeChild(a);
   };
-  
+
   const aspectClass = aspectRatio === '16:9' ? "max-w-3xl aspect-video" : "max-w-sm aspect-[9/16]";
+  const isError = !isGenerating && !thumbnailUrl && !!error;
 
   return (
     <div className="flex flex-col gap-6 w-full max-w-4xl mx-auto h-full">
@@ -37,9 +51,18 @@ export const StepThumbnail: React.FC<StepThumbnailProps> = ({
             <h2 className="font-hand text-3xl font-bold text-ink">Ảnh Bìa (Thumbnail)</h2>
             <p className="font-sans text-gray-600 text-sm">Tạo ấn tượng đầu tiên mạnh mẽ.</p>
         </div>
-        <div className="flex gap-2">
-             <Button variant="secondary" onClick={onBack}>Quay lại</Button>
-            <Button onClick={onExportZip} disabled={!thumbnailUrl}>
+        <div className="flex gap-2 flex-wrap justify-end">
+             {isGenerating && (
+               <Button
+                 variant="secondary"
+                 onClick={onStop}
+                 className="!text-accent !border-accent hover:!bg-red-50"
+               >
+                 ■ Dừng
+               </Button>
+             )}
+             <Button variant="secondary" onClick={onBack} disabled={isGenerating}>Quay lại</Button>
+            <Button onClick={onExportZip} disabled={!thumbnailUrl || isGenerating}>
                 Tiếp: Tạo Audio & Tải về
             </Button>
         </div>
@@ -54,19 +77,14 @@ export const StepThumbnail: React.FC<StepThumbnailProps> = ({
                  </div>
               ) : thumbnailUrl ? (
                 <>
-                  <img 
-                    src={thumbnailUrl} 
-                    alt="Thumbnail" 
-                    className="w-full h-full object-cover" 
+                  <img
+                    src={thumbnailUrl}
+                    alt="Thumbnail"
+                    className="w-full h-full object-cover"
                   />
-                  <div className="absolute inset-0 bg-paper/90 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-3 z-10">
-                    <Button 
-                        variant="secondary" 
-                        onClick={onRegenerate}
-                    >
-                        Tạo Lại Khác
-                    </Button>
-                    <button 
+                  {/* Hover: download only — regen/edit moved below */}
+                  <div className="absolute inset-0 bg-paper/80 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center z-10">
+                    <button
                         onClick={() => downloadImage(thumbnailUrl, 'thumbnail.png')}
                         className="bg-ink text-paper px-6 py-2 rounded-lg font-hand text-lg hover:bg-black transition-colors flex items-center gap-2 shadow-lg"
                     >
@@ -75,17 +93,50 @@ export const StepThumbnail: React.FC<StepThumbnailProps> = ({
                     </button>
                   </div>
                 </>
+              ) : isError ? (
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center bg-red-50/40">
+                   <span className="text-3xl">⚠️</span>
+                   <div className="font-hand text-2xl text-accent">Lỗi tạo thumbnail</div>
+                   <div className="font-sans text-sm text-gray-500 line-clamp-3">{error}</div>
+                </div>
               ) : (
                 <div className="absolute inset-0 flex items-center justify-center text-ink/30 font-hand text-2xl">
                    [ Chưa có Thumbnail ]
                 </div>
               )}
         </div>
-        
-        {!isGenerating && !thumbnailUrl && (
-             <Button onClick={onRegenerate} className="mt-8">Tạo Thumbnail Ngay</Button>
-        )}
+
+        {/* Compact action strip — ALWAYS visible (works for success, error, and empty states) */}
+        <div className="flex items-center gap-2 mt-4">
+          <button
+            onClick={() => onRegenerate()}
+            disabled={isGenerating}
+            className="font-hand text-base px-4 py-1.5 rounded-lg border-2 border-ink/30 hover:border-ink hover:bg-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+            title={thumbnailUrl ? 'Tạo lại với prompt cũ' : 'Tạo thumbnail'}
+          >
+            <span>↻</span>
+            <span>{thumbnailUrl ? 'Tạo Lại' : 'Tạo Ngay'}</span>
+          </button>
+          <button
+            onClick={() => setCustomOpen(true)}
+            disabled={isGenerating}
+            className="font-hand text-base px-4 py-1.5 rounded-lg border-2 border-ink/30 hover:border-ink hover:bg-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+            title="Sửa prompt rồi tạo lại"
+          >
+            <span>✏️</span>
+            <span>Sửa Prompt</span>
+          </button>
+        </div>
       </div>
+
+      <CustomPromptModal
+        open={customOpen}
+        language={language}
+        defaultPrompt={defaultCustomPrompt}
+        contextLabel="Thumbnail"
+        onClose={() => setCustomOpen(false)}
+        onSubmit={(prompt) => onRegenerate(prompt)}
+      />
     </div>
   );
 };

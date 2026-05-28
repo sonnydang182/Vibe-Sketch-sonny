@@ -5,6 +5,17 @@ export interface Scene {
   keywords: string; // New field for text on image
   imageUrl?: string;
   isGeneratingImage?: boolean;
+  /** Last image generation error message, cleared on retry. */
+  error?: string;
+  /** Older voiceover versions kept for revert (newest first, max ~3). */
+  voiceoverVariants?: string[];
+  /** Per-scene TTS audio (data: URL so it survives JSON serialization to history). */
+  audioUrl?: string;
+  isGeneratingAudio?: boolean;
+  audioError?: string;
+  /** Tag identifying which voiceover string produced audioUrl; lets UI know
+   *  audio is stale when the user edits voiceover. */
+  audioForText?: string;
 }
 
 export interface Script {
@@ -31,12 +42,27 @@ export type Language = 'Vietnamese' | 'English' | 'Japanese';
 
 export type ImageProvider = 'gemini' | 'coachio_gpt_image_2';
 
+export type CharacterId =
+  | 'stickman'
+  | '01-curious' | '02-hyperactive' | '03-sleepy' | '04-confident'
+  | '05-anxious' | '06-mischievous' | '07-introvert' | '08-inventor'
+  | '09-athlete' | '10-dreamer' | '11-strict-teacher' | '12-gamer'
+  | '13-cheerful' | '14-overthinker' | '15-detective' | '16-artist'
+  | '17-leader' | '18-bookworm' | '19-dramatic' | '20-gentle';
+
 export interface GenerationConfig {
   topic: string;
   tone: 'Stoic' | 'Motivational' | 'Dark Philosophy' | 'Humorous';
   duration: 'Short (60s)' | 'Medium (3 mins)' | 'Long (5-10 mins)';
   aspectRatio: '16:9' | '9:16';
   language: Language;
+  /** 1-3 characters. Index 0 = primary, others are supporting cast.
+   *  Slots that should "default to stickman" simply hold 'stickman'. */
+  characters: CharacterId[];
+  /**
+   * @deprecated kept for backward compat with v1 saves; migrated to `characters` on load.
+   */
+  character?: CharacterId;
 }
 
 export interface AppSettings {

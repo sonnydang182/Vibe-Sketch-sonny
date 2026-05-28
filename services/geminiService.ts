@@ -1,6 +1,6 @@
 import { GoogleGenAI, Type, Modality } from "@google/genai";
 import { Scene, Language, ImageProvider } from "../types";
-import { generateImageWithCoachio } from "./coachioService";
+import { generateImageWithCoachio, uploadImage as coachioUpload } from "./coachioService";
 
 let userGeminiApiKey: string | null = null;
 
@@ -124,42 +124,110 @@ export const generateViralTitles = async (topic: string, tone: string, language:
 };
 
 /**
+ * Total-duration profile shared between script generation and per-scene
+ * rewrite budgeting. Key insight: scene count should NOT scale linearly
+ * with duration — cap at ~28 so viewers don't get whiplash. Instead, longer
+ * videos get longer voiceovers per scene.
+ */
+export interface DurationProfile {
+  totalSeconds: number;
+  targetScenes: number;
+  secsPerScene: number;
+  wordsPerScene: { min: number; max: number; target: number };
+  density: 'snappy' | 'engaging' | 'cinematic';
+}
+
+const WORDS_PER_SECOND: Record<Language, number> = {
+  Vietnamese: 3.2,
+  English: 2.5,
+  Japanese: 4.0,
+};
+
+/** Parse the user-facing duration label into total seconds. */
+const parseDurationSeconds = (label: string): number => {
+  if (label.includes('60s') || label.includes('60 s')) return 60;
+  if (label.includes('3 min')) return 180;
+  if (label.includes('5-10') || label.includes('Long')) return 450;
+  return 180;
+};
+
+/**
+ * Build a duration profile. Scene count grows slowly with duration so the
+ * voiceover per scene scales up too (matching the chosen total duration).
+ *
+ *   60s  →  14 scenes × ~4.3s   →   ~14 words / scene (VN)
+ *  120s  →  18 scenes × ~6.7s   →   ~22 words / scene
+ *  180s  →  22 scenes × ~8.2s   →   ~26 words / scene
+ *  450s  →  28 scenes × ~16s    →   ~51 words / scene  (capped)
+ */
+export const buildDurationProfile = (
+  durationLabel: string,
+  language: Language,
+): DurationProfile => {
+  const totalSeconds = parseDurationSeconds(durationLabel);
+  const targetScenes =
+    totalSeconds <= 60 ? 14 :
+    totalSeconds <= 120 ? 18 :
+    totalSeconds <= 180 ? 22 :
+    totalSeconds <= 300 ? 25 : 28;
+  const secsPerScene = totalSeconds / targetScenes;
+  const wps = WORDS_PER_SECOND[language] ?? 3.0;
+  const target = Math.round(secsPerScene * wps);
+  const min = Math.max(3, Math.floor(target * 0.75));
+  const max = Math.max(min + 2, Math.ceil(target * 1.25));
+  const density: DurationProfile['density'] =
+    secsPerScene < 5 ? 'snappy' :
+    secsPerScene < 10 ? 'engaging' : 'cinematic';
+  return { totalSeconds, targetScenes, secsPerScene, wordsPerScene: { min, max, target }, density };
+};
+
+/**
  * Generate Script, Visual Descriptions and Keywords
  */
 export const generateScriptScenes = async (title: string, duration: string, language: Language): Promise<Scene[]> => {
   const ai = getAI();
   const config = LANGUAGE_CONFIG[language];
+  const profile = buildDurationProfile(duration, language);
+
+  const densityFeel: Record<DurationProfile['density'], string> = {
+    snappy: 'snappy, fast-cut, TikTok-style — every line punches',
+    engaging: 'engaging with breathing room — like a polished YouTube explainer',
+    cinematic: 'cinematic and reflective — longer beats, more storytelling per scene',
+  };
 
   const prompt = `
-    Act as a master storyteller for viral short videos (TikTok/Shorts style) in ${language}.
+    Act as a master storyteller for ${language} explainer videos (stick-figure / doodle style).
     Create a script for a video titled: "${title}".
-    Target Duration: ${duration}.
-    
+    Target total duration: ${duration} (~${profile.totalSeconds}s).
+
     TONE & LANGUAGE RULES (CRITICAL):
     1. **Universal Appeal:** Simple, punchy, and understandable.
     2. **Engaging Voice:** Sound like a smart friend sharing a secret.
     3. **Cultural Context:** ${config.scriptRules}
-    
-    PACING RULE: **EXTREME DENSITY (2 Seconds Per Scene)**
-    - Break the voiceover into TINY fragments (4-8 words max per scene).
-    - Total scenes should be high count for the duration.
-    
+
+    PACING & DENSITY (HARD CONSTRAINT — must match the requested duration):
+    - Total scenes: aim for ${profile.targetScenes} scenes (acceptable range: ${Math.max(8, profile.targetScenes - 3)}–${profile.targetScenes + 3}).
+    - DO NOT exceed 30 scenes total — instead, make each scene's voiceover LONGER if the duration is long.
+    - Each scene plays for ~${profile.secsPerScene.toFixed(1)} seconds.
+    - Each scene's voiceover: target ~${profile.wordsPerScene.target} words (range ${profile.wordsPerScene.min}–${profile.wordsPerScene.max}).
+    - The overall feel should be ${densityFeel[profile.density]}.
+
     STRUCTURE REQUIREMENTS:
-    1. **THE HOOK (Scenes 1, 2, and 3):** 
-       - Scene 1: Statement/Question. Scene 2: The twist/problem. Scene 3: The bridge to the solution.
-    2. **The Body:** Break down the concept into visual steps.
-    3. **The Conclusion:** A powerful, memorable one-liner.
+    1. **THE HOOK (first 2-3 scenes):**
+       - Scene 1: Statement/Question. Scene 2: The twist/problem. Scene 3: Bridge to the body.
+    2. **The Body:** Break down the concept into visual steps. Each scene = one idea + one visual.
+    3. **The Conclusion:** A powerful, memorable one-liner that loops back to the hook.
 
     VISUAL INSTRUCTION:
-    - Ensure logical visual progression (Comic strip style).
-    - Visuals must be SIMPLE stick figure metaphors.
+    - Ensure logical visual progression (comic-strip style — each scene builds on the previous).
+    - Visuals must be simple character / stick-figure metaphors.
 
     For each scene, provide:
-    - 'voiceover': ${language} spoken text. (Very short).
-    - 'visualPrompt': Simple, clear visual metaphor for a stickman (Describe in English for the artist).
-    - 'keywords': The exact text to be written inside the image (${config.visualText}, 1-3 words max).
+    - 'voiceover': ${language} spoken text, MUST be within the ${profile.wordsPerScene.min}–${profile.wordsPerScene.max} word range.
+    - 'visualPrompt': clear visual metaphor (describe in English for the artist).
+    - 'keywords': exact text to overlay on the image (${config.visualText}, 1-3 words max).
 
-    Return JSON array of objects.
+    Return ONLY a JSON array of ${profile.targetScenes} (±3) scene objects.
   `;
 
   try {
@@ -201,10 +269,66 @@ export const generateScriptScenes = async (title: string, duration: string, lang
   }
 };
 
+interface CharacterRef {
+  /** Inline base64 + mime, used by Gemini directly. */
+  inline?: { data: string; mimeType: string };
+  /** Blob, used to upload to Coachio. */
+  blob?: Blob;
+  /** Style hint for the prompt: "doodle character with brown short hair...". */
+  styleHint: string;
+  /** Personality hint: "curious, holding a magnifying glass". */
+  personalityHint: string;
+  /** Visible label for prompt context: "Tò mò". */
+  label: string;
+  /** True when this slot is the default stickman (no reference image). */
+  isStickman?: boolean;
+}
+
 interface ImageProviderOpts {
   provider?: ImageProvider;
   coachioApiKey?: string;
+  /** 0-3 character references. Empty / undefined = pure stickman scene. */
+  characterRefs?: CharacterRef[];
 }
+
+const buildCharacterStyleBlock = (refs?: CharacterRef[]): string => {
+  const doodles = (refs || []).filter(r => !r.isStickman && r.inline);
+  const stickmanCount = (refs || []).filter(r => r.isStickman).length;
+
+  // Pure stickman scene (no doodle references at all)
+  if (doodles.length === 0) {
+    return `
+    CHARACTER STYLE — CLASSIC STICKMAN${stickmanCount > 1 ? `S (${stickmanCount} of them)` : ''}:
+    - Perfect circle head, simple thin black stick limbs.
+    - Clear facial expression (eyes + mouth only) reflecting the scene emotion.
+    - No clothing, no hair details. Pure minimalist stickman.`;
+  }
+
+  if (doodles.length === 1 && stickmanCount === 0) {
+    const r = doodles[0];
+    return `
+    CHARACTER STYLE — SINGLE DOODLE (must match the attached reference image):
+    - Main character: ${r.styleHint}. Personality / typical pose: ${r.personalityHint}.
+    - Loose hand-drawn doodle line style: black outlines + light cel-shading with flat colors.
+    - Keep RECOGNIZABLE across scenes (same hair, outfit, palette as reference).
+    - Adapt only pose / expression to fit the scene.
+    - If the script needs a SUPPORTING figure (e.g., the main character talking to someone),
+      use a small classic stickman beside the main doodle — never invent a second doodle.`;
+  }
+
+  const list = doodles
+    .map((r, i) => `    - Character ${i + 1} ("${r.label}"): ${r.styleHint}. Personality: ${r.personalityHint}.`)
+    .join('\n');
+
+  return `
+    CHARACTER STYLE — DOODLE CAST (must match the attached reference images, in order):
+${list}
+    - Loose hand-drawn doodle line style: black outlines + light cel-shading + flat colors.
+    - Each character MUST stay recognizable scene-to-scene (same hair, outfit, palette).
+    - Adapt only pose / expression to fit the scene.${stickmanCount > 0 ? `
+    - This scene also includes ${stickmanCount} extra figure(s) drawn as classic stickman (small, minimalist).` : doodles.length === 2 ? `
+    - If a third figure is needed, draw it as a classic stickman.` : ''}`;
+};
 
 /**
  * Generate Doodle Image (With Retry, supports Gemini or Coachio GPT Image 2)
@@ -216,41 +340,65 @@ export const generateDoodleImage = async (
   language: Language,
   opts: ImageProviderOpts = {}
 ): Promise<string | undefined> => {
+  const refs = opts.characterRefs ?? [];
+  const doodleRefs = refs.filter(r => !r.isStickman);
+
   const fullPrompt = `
-    Create a clean, funny, minimalist digital illustration in the style of "Better Than Yesterday" or "Casually Explained" YouTube channels.
+    Create a clean, funny, minimalist hand-drawn doodle illustration in the style of
+    Vietnamese / Better-Than-Yesterday-style explainer channels.
 
-    SUBJECT: A classic STICK FIGURE representing this concept: ${visualPrompt}.
-    TEXT: Write "${textToRender}" clearly in the image. Font: Hand-written, bold black.
+    SCENE: ${visualPrompt}.
+    TEXT: Write "${textToRender}" clearly in the image. Font: hand-written marker, bold black.
+    The text is in ${language}.
 
-    STYLE RULES:
-    1. CHARACTER: Classic stickman. Perfect circle head. Simple stick limbs.
-    2. EXPRESSION: The stickman MUST have a clear facial expression (Eyes and Mouth only).
-    3. LINES: Clean, consistent, smooth black lines. NOT messy. NO "pencil" texture.
-    4. COLOR: BLACK lines only.
-    5. BACKGROUND: Solid OFF-WHITE / BEIGE (#FDF6E3). Flat color.
+    ${buildCharacterStyleBlock(refs)}
 
-    Important: The text "${textToRender}" must be legible. It is in ${language}.
+    BACKGROUND: solid OFF-WHITE / BEIGE (#FDF6E3). Flat color, no texture.
+    LINES: smooth black outlines. No pencil grain, no rough sketching.
 
     COMPOSITION:
-    - Center the stickman.
+    - Center the character${doodleRefs.length > 1 ? 's' : ''}.
     - Keep it simple and uncluttered.
-    - High contrast: Black on Beige.
+    - High contrast.
     - Format: ${aspectRatio === '9:16' ? 'Vertical Portrait (9:16)' : 'Horizontal Landscape (16:9)'}.
   `;
 
+  // Coachio path
   if (opts.provider === 'coachio_gpt_image_2') {
+    let imagesUrl: string[] | undefined;
+    if (doodleRefs.length > 0 && opts.coachioApiKey) {
+      try {
+        const urls = await Promise.all(
+          doodleRefs
+            .filter(r => r.blob)
+            .map((r, i) => coachioUpload(opts.coachioApiKey!, r.blob!, `character-${i + 1}.png`))
+        );
+        imagesUrl = urls;
+      } catch (e) {
+        console.warn('Coachio character upload failed, generating without refs:', e);
+      }
+    }
     return generateImageWithCoachio({
       apiKey: opts.coachioApiKey || '',
       prompt: fullPrompt,
       aspectRatio,
+      imagesUrl,
     });
   }
 
+  // Gemini path — attach all doodle reference images inline
   const ai = getAI();
+  const inlineParts = doodleRefs
+    .filter(r => r.inline)
+    .map(r => ({ inlineData: { mimeType: r.inline!.mimeType, data: r.inline!.data } }));
+  const contents = inlineParts.length > 0
+    ? [{ role: 'user', parts: [...inlineParts, { text: fullPrompt }] }]
+    : fullPrompt;
+
   return withRetry(async () => {
     const response = await ai.models.generateContent({
       model: "gemini-3-pro-image-preview",
-      contents: fullPrompt,
+      contents: contents as any,
       config: {
         imageConfig: {
             aspectRatio: aspectRatio,
@@ -282,13 +430,35 @@ export const generateThumbnailImage = async (
   aspectRatio: '16:9' | '9:16',
   opts: ImageProviderOpts = {}
 ): Promise<string | undefined> => {
+    const refs = opts.characterRefs ?? [];
+    const doodleRefs = refs.filter(r => !r.isStickman);
     const orientationGuide = aspectRatio === '9:16'
-      ? `VERTICAL PORTRAIT (9:16) — for Shorts/TikTok. Stack the title text on TOP (2-3 lines), the stick figure in the lower 2/3.`
-      : `HORIZONTAL LANDSCAPE (16:9) — for YouTube. Place the title text on the LEFT half (2-3 lines), the stick figure on the RIGHT half. Or split top/bottom.`;
+      ? `VERTICAL PORTRAIT (9:16) — for Shorts/TikTok. Stack the title text on TOP (2-3 lines), the character${doodleRefs.length > 1 ? 's' : ''} in the lower 2/3.`
+      : `HORIZONTAL LANDSCAPE (16:9) — for YouTube. Place the title text on the LEFT half (2-3 lines), the character${doodleRefs.length > 1 ? 's' : ''} on the RIGHT half. Or split top/bottom.`;
+
+    const characterDirective = doodleRefs.length === 0
+      ? `STICK FIGURE:
+      - Classic stickman: perfect circle head, simple black stick limbs.
+      - HIGHLY DRAMATIC expression — shocked / amazed / mind-blown / excited.
+      - Clear pose that visually echoes the concept: ${visualMetaphor || title}.
+      - Optional supporting prop (book, light bulb, dollar sign, trophy, brain icon, phone, clock).`
+      : doodleRefs.length === 1
+      ? `CHARACTER (must match the attached reference image):
+      - Same character: ${doodleRefs[0].styleHint}.
+      - Personality: ${doodleRefs[0].personalityHint}.
+      - HIGHLY DRAMATIC expression — shocked / amazed / excited / surprised.
+      - Same hairstyle, outfit, and color palette as the reference.
+      - Pose echoes the concept: ${visualMetaphor || title}.`
+      : `CHARACTERS (must match the attached reference images, in order):
+${doodleRefs.map((r, i) => `      - Character ${i + 1} ("${r.label}"): ${r.styleHint}. Personality: ${r.personalityHint}.`).join('\n')}
+      - All ${doodleRefs.length} characters appear together in the thumbnail.
+      - All have HIGHLY DRAMATIC expressions reacting to the topic.
+      - Same hairstyle, outfit, and color palette as their respective references.${refs.some(r => r.isStickman) ? `
+      - Plus a small classic stickman in the background as supporting figure.` : ''}`;
 
     const prompt = `
-      Create a HIGH-CTR YOUTUBE THUMBNAIL in the visual style of the Vietnamese
-      doodle channels "Better Than Yesterday", "Tri Thức Vui Vẻ" — stick-figure
+      Create a HIGH-CTR YOUTUBE THUMBNAIL in the visual style of Vietnamese
+      doodle channels ("Better Than Yesterday", "Tri Thức Vui Vẻ") — hand-drawn
       illustration with bold handwritten typography.
 
       TITLE TEXT (must appear large and legible in the image):
@@ -298,14 +468,10 @@ export const generateThumbnailImage = async (
         yellow rectangular highlighter behind a key word, OR color a power word red).
       - Title takes ~40-50% of the canvas. Multi-line, tight leading.
 
-      STICK FIGURE:
-      - Classic stickman: perfect circle head, simple black stick limbs.
-      - HIGHLY DRAMATIC expression — shocked / amazed / mind-blown / excited.
-      - Clear pose that visually echoes the concept: ${visualMetaphor || title}.
-      - Optional supporting prop (book, light bulb, dollar sign, trophy, brain icon, phone, clock).
+      ${characterDirective}
 
       ATTENTION-GRAB ELEMENTS (add 1-2, not all):
-      - Bold RED hand-drawn arrow pointing at the stickman or key word.
+      - Bold RED hand-drawn arrow pointing at the character or key word.
       - Or split the canvas into a "before vs after" / "wrong vs right" comparison
         with a red ✗ on one side and green ✓ on the other.
       - Or a small percentage / number badge ("90%", "3 BƯỚC") in red or yellow.
@@ -313,7 +479,7 @@ export const generateThumbnailImage = async (
       STYLE RULES:
       1. Background: solid OFF-WHITE / BEIGE (#FDF6E3). Flat color, no texture.
       2. Lines: clean, smooth, consistent BLACK strokes. No pencil grain.
-      3. Color palette: black + beige + accent RED + accent YELLOW. Nothing else.
+      3. Accent palette: black + beige + accent RED + accent YELLOW${doodleRefs.length > 0 ? ' + the reference characters\' own colors' : ''}.
       4. High contrast, instantly readable on a phone screen.
       5. NO real photographs. NO 3D rendering. Pure 2D doodle.
 
@@ -322,19 +488,42 @@ export const generateThumbnailImage = async (
       The title text must be in the same language as written above (do NOT translate).
     `;
 
+    // Coachio path
     if (opts.provider === 'coachio_gpt_image_2') {
+      let imagesUrl: string[] | undefined;
+      if (doodleRefs.length > 0 && opts.coachioApiKey) {
+        try {
+          const urls = await Promise.all(
+            doodleRefs
+              .filter(r => r.blob)
+              .map((r, i) => coachioUpload(opts.coachioApiKey!, r.blob!, `character-${i + 1}.png`))
+          );
+          imagesUrl = urls;
+        } catch (e) {
+          console.warn('Coachio character upload failed, generating without refs:', e);
+        }
+      }
       return generateImageWithCoachio({
         apiKey: opts.coachioApiKey || '',
         prompt,
         aspectRatio,
+        imagesUrl,
       });
     }
 
+    // Gemini path — attach all reference images inline
     const ai = getAI();
+    const inlineParts = doodleRefs
+      .filter(r => r.inline)
+      .map(r => ({ inlineData: { mimeType: r.inline!.mimeType, data: r.inline!.data } }));
+    const contents = inlineParts.length > 0
+      ? [{ role: 'user', parts: [...inlineParts, { text: prompt }] }]
+      : prompt;
+
     return withRetry(async () => {
       const response = await ai.models.generateContent({
         model: "gemini-3-pro-image-preview",
-        contents: prompt,
+        contents: contents as any,
         config: {
           imageConfig: {
               aspectRatio: aspectRatio,
@@ -354,32 +543,131 @@ export const generateThumbnailImage = async (
     });
   };
 
+interface RewriteOptions {
+  /** Soft floor — natural-sounding target lower bound. */
+  minWords?: number;
+  /** Hard cap on output word count. */
+  maxWords?: number;
+  /** Approximate spoken duration in seconds — used to give the AI a feel for pacing. */
+  targetSeconds?: number;
+  /** Scene context — keeps the rewritten VO tied to what's on screen and to neighbours. */
+  context?: {
+    visualPrompt?: string;
+    keywords?: string;
+    prevVoiceover?: string;
+    nextVoiceover?: string;
+  };
+}
+
+const countWords = (s: string): number => {
+  if (!s) return 0;
+  // For Japanese (CJK), word boundaries are ambiguous — count phonetic chunks
+  // by treating runs of CJK chars as ~1 word per 2 chars. For others, split on whitespace.
+  const trimmed = s.trim();
+  if (!trimmed) return 0;
+  if (/[぀-ヿ一-鿿]/.test(trimmed)) {
+    // CJK-heavy: ~2 chars per "word"
+    return Math.max(1, Math.round(trimmed.length / 2));
+  }
+  return trimmed.split(/\s+/).length;
+};
+
+const stripWrappingQuotes = (s: string): string =>
+  s.trim().replace(/^[`"']+|[`"']+$/g, '').trim();
+
 /**
- * Rewrite script content (Longer/Shorter)
+ * Rewrite a script fragment longer/shorter, clamped to a per-scene word/time
+ * budget and aligned with the on-screen visual + neighbouring scenes.
+ *
+ * Forces the model to actually CHANGE the text (rephrase when at budget),
+ * so the user always sees a result after clicking "Dài" / "Ngắn".
  */
-export const rewriteScript = async (currentScript: string, mode: 'longer' | 'shorter', language: Language): Promise<string> => {
+export const rewriteScript = async (
+  currentScript: string,
+  mode: 'longer' | 'shorter',
+  language: Language,
+  options: RewriteOptions = {}
+): Promise<string> => {
   const ai = getAI();
   const config = LANGUAGE_CONFIG[language];
+  const { minWords, maxWords, targetSeconds, context } = options;
+
+  const currentWords = countWords(currentScript);
+  const lo = minWords ?? Math.max(2, Math.floor(currentWords * 0.6));
+  const hi = maxWords ?? Math.max(lo + 3, currentWords + 3);
+
+  // Target word count within the [lo..hi] band:
+  //  - "longer": aim closer to hi, with at least +1 word over current (capped by hi).
+  //  - "shorter": aim closer to lo (capped by floor).
+  let targetWords: number;
+  let atCap = false;
+  if (mode === 'longer') {
+    const wanted = Math.max(currentWords + 1, Math.round(currentWords * 1.35));
+    targetWords = Math.min(hi, wanted);
+    atCap = targetWords <= currentWords;
+  } else {
+    const wanted = Math.max(lo, Math.round(currentWords * 0.7));
+    targetWords = Math.max(lo, wanted);
+  }
+
+  const direction = mode === 'longer'
+    ? (atCap
+        ? `KEEP the word count near ${currentWords} but REPHRASE with richer vocabulary, more vivid imagery, or stronger emotion`
+        : `EXPAND with vivid detail to roughly ${targetWords} words (within ${lo}–${hi})`)
+    : `TIGHTEN to roughly ${targetWords} words (within ${lo}–${hi}) by cutting filler — keep only the punch`;
+
+  const budgetBlock = (minWords || maxWords) ? `
+    BUDGET (must respect):
+    - Word range for this scene: ${lo}–${hi} words${targetSeconds ? ` (~${targetSeconds.toFixed(1)}s spoken at natural pace)` : ''}.
+    - Current input is ${currentWords} words.
+    - Target output: ~${targetWords} words (stay in range).
+    - This fragment is one scene of a fast-paced explainer video.` : '';
+
+  const contextBlock = context ? `
+    SCENE CONTEXT (the rewrite MUST stay relevant to this):
+    ${context.visualPrompt ? `- What appears on screen: ${context.visualPrompt}` : ''}
+    ${context.keywords ? `- Text overlay shown on the image: "${context.keywords}"` : ''}
+    ${context.prevVoiceover ? `- Previous scene's voiceover: "${context.prevVoiceover}"` : ''}
+    ${context.nextVoiceover ? `- Next scene's voiceover: "${context.nextVoiceover}"` : ''}` : '';
 
   const prompt = `
-    You are a professional video script editor for the ${language} market.
-    Rewrite the following ${language} script to be ${mode === 'longer' ? 'slightly more detailed and emotional (about 20% longer)' : 'more concise and punchy (about 20% shorter)'}.
-    
-    IMPORTANT RULES:
-    1. Keep the exact same meaning and core message.
-    2. Maintain the tone: ${config.scriptRules}
-    3. Return ONLY the rewriten text, no explanations.
-    
-    Original Script:
-    "${currentScript}"
+    You are a viral-video voiceover editor for the ${language} market.
+    Rewrite this single-scene voiceover fragment: ${direction}.
+${budgetBlock}
+${contextBlock}
+
+    MANDATORY:
+    1. Output MUST be DIFFERENT from the input. Returning the input verbatim is a failure.
+    2. Stay on-topic with the scene context above — don't drift to unrelated ideas.
+    3. Flow naturally with the previous / next voiceover if given (no abrupt topic jump).
+    4. Keep the core meaning and the tone: ${config.scriptRules}
+    5. Output ONLY the rewritten ${language} text. No quotes, no labels, no explanation.
+
+    Original:
+    ${currentScript}
   `;
 
-  try {
+  const callOnce = async (): Promise<string> => {
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: prompt
+      contents: prompt,
     });
-    return response.text || currentScript;
+    return stripWrappingQuotes(response.text || '');
+  };
+
+  try {
+    let result = await callOnce();
+    // If the model returned the input unchanged (happens with strict prompts),
+    // retry once with an explicit "must reword" suffix.
+    if (result && result === stripWrappingQuotes(currentScript)) {
+      const retryResp = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: prompt + `\n\n    CRITICAL: Previous attempt returned the input unchanged. Use different words this time — synonyms, different sentence structure, or different focus.`,
+      });
+      const retry = stripWrappingQuotes(retryResp.text || '');
+      if (retry && retry !== stripWrappingQuotes(currentScript)) result = retry;
+    }
+    return result || currentScript;
   } catch (error) {
     console.error("Rewrite error", error);
     return currentScript;
