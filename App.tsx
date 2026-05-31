@@ -55,10 +55,23 @@ import { hasWhisperProvider, createWhisperProvider } from './services/whisperSer
 import {
   alignSceneTimingsToWhisper,
 } from './services/captionService';
+import {
+  assembleVideo,
+  isVideoRenderSupported,
+} from './services/videoService';
+import { CaptionStyle, VideoRenderProgress } from './types';
 
 const SETTINGS_KEY = 'vibesketch.settings.v1';
 const HISTORY_KEY = 'vibesketch.history.v1';
 const ACTIVE_PROJECT_KEY = 'vibesketch.activeProjectId.v1';
+
+const DEFAULT_CAPTION_STYLE: CaptionStyle = {
+  position: 'bottom',
+  size: 'medium',
+  textColor: 'white',
+  highlight: 'yellow',
+  background: false,
+};
 
 const DEFAULT_SETTINGS: AppSettings = {
   imageProvider: 'coachio_gpt_image_2',
@@ -68,6 +81,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   groqApiKey: '',
   coachioTtsVoice: COACHIO_VOICES[0].id,
   geminiTtsStyle: '',
+  captionStyle: DEFAULT_CAPTION_STYLE,
 };
 
 const DEFAULT_CONFIG: GenerationConfig = {
@@ -235,6 +249,13 @@ const App: React.FC = () => {
   const [whisperTimings, setWhisperTimings] = useState<SceneTiming[] | null>(null);
   const [isAligningWhisper, setIsAligningWhisper] = useState(false);
   const [whisperError, setWhisperError] = useState<string | undefined>(undefined);
+
+  // Video render (step 7 — final mp4)
+  const [videoUrl, setVideoUrl] = useState<string | undefined>(undefined);
+  const [isRendering, setIsRendering] = useState(false);
+  const [renderProgress, setRenderProgress] = useState<VideoRenderProgress | undefined>(undefined);
+  const [renderError, setRenderError] = useState<string | undefined>(undefined);
+  const renderAbortRef = useRef<AbortController | null>(null);
 
   // Push API keys into the service module whenever settings change.
   useEffect(() => {
@@ -1022,6 +1043,66 @@ const App: React.FC = () => {
     setWhisperError(undefined);
   }, [audioUrl, scenes]);
 
+  /**
+   * Render the final mp4 via ffmpeg.wasm. Streams progress back into state so
+   * the StepVideo UI can show a live phase + percent bar.
+   */
+  const handleRenderVideo = async (timings: SceneTiming[]) => {
+    if (!audioBlob) {
+      alert("Chưa có audio gộp để dựng video.");
+      return;
+    }
+    if (!timings.length) {
+      alert("Không có timing scene.");
+      return;
+    }
+    const ac = new AbortController();
+    renderAbortRef.current = ac;
+    setIsRendering(true);
+    setRenderError(undefined);
+    setRenderProgress({ phase: 'load_ffmpeg', ratio: 0, message: 'Bắt đầu...' });
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
+    setVideoUrl(undefined);
+
+    try {
+      const blob = await assembleVideo({
+        scenes,
+        timings,
+        audioBlob,
+        aspectRatio: config.aspectRatio,
+        captionStyle: settings.captionStyle,
+        signal: ac.signal,
+        onProgress: setRenderProgress,
+      });
+      if (ac.signal.aborted) return;
+      const url = URL.createObjectURL(blob);
+      setVideoUrl(url);
+    } catch (e: any) {
+      console.error("Video render failed", e);
+      if (!ac.signal.aborted) {
+        setRenderError(e?.message || String(e));
+      }
+    } finally {
+      if (renderAbortRef.current === ac) renderAbortRef.current = null;
+      setIsRendering(false);
+    }
+  };
+
+  const handleCancelRender = () => {
+    renderAbortRef.current?.abort();
+    renderAbortRef.current = null;
+  };
+
+  // Drop the rendered video whenever underlying inputs change — stale.
+  useEffect(() => {
+    if (videoUrl) {
+      URL.revokeObjectURL(videoUrl);
+      setVideoUrl(undefined);
+    }
+    setRenderError(undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [audioUrl, scenes, settings.captionStyle, config.aspectRatio]);
+
   const handleExportZip = async () => {
     const zip = new JSZip();
     const folderName = config.topic.replace(/[^a-z0-9]/gi, '_').toLowerCase() || 'project';
@@ -1193,6 +1274,7 @@ const App: React.FC = () => {
             scenes={scenes}
             audioUrl={audioUrl}
             language={config.language}
+            aspectRatio={config.aspectRatio}
             hasWhisperProvider={hasWhisperProvider({
               coachioApiKey: settings.coachioApiKey,
               geminiApiKey: settings.geminiApiKey,
@@ -1205,6 +1287,15 @@ const App: React.FC = () => {
             onOpenSettings={() => setView('settings')}
             onBack={() => setStep(AppStep.GENERATE_AUDIO)}
             onExportZip={handleExportZip}
+            captionStyle={settings.captionStyle ?? DEFAULT_CAPTION_STYLE}
+            onChangeCaptionStyle={(captionStyle) => setSettings(s => ({ ...s, captionStyle }))}
+            videoUrl={videoUrl}
+            isRendering={isRendering}
+            renderProgress={renderProgress}
+            renderError={renderError}
+            onRender={handleRenderVideo}
+            onCancelRender={handleCancelRender}
+            videoRenderSupported={isVideoRenderSupported()}
           />
         );
       default:

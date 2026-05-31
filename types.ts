@@ -50,6 +50,35 @@ export interface SceneTiming {
   source: 'estimated' | 'whisper';
 }
 
+/** Position of caption on the video frame. */
+export type CaptionPosition = 'bottom' | 'middle' | 'top';
+
+/** Caption highlight (used for the karaoke per-word color when wired). */
+export type CaptionHighlight = 'yellow' | 'red' | 'cyan' | 'green';
+
+/** Caption text size preset. Maps to ASS font sizes per render resolution. */
+export type CaptionSize = 'small' | 'medium' | 'large';
+
+export interface CaptionStyle {
+  position: CaptionPosition;
+  size: CaptionSize;
+  /** Primary text colour — white is the safest CTR pick. */
+  textColor: 'white' | 'yellow';
+  /** Word / phrase highlight colour. Used by karaoke when word timestamps land. */
+  highlight: CaptionHighlight;
+  /** Black box behind the line — helpful on busy backgrounds. */
+  background: boolean;
+}
+
+/** Progress event from videoService.assembleVideo. */
+export interface VideoRenderProgress {
+  phase: 'load_ffmpeg' | 'write_assets' | 'encode' | 'finalize';
+  /** 0..1 — overall completion. */
+  ratio: number;
+  /** Free-form short note ("Đang tải ffmpeg core...", etc.). */
+  message?: string;
+}
+
 export type Language = 'Vietnamese' | 'English' | 'Japanese';
 
 export type ImageProvider = 'gemini' | 'coachio_gpt_image_2';
@@ -93,6 +122,8 @@ export interface AppSettings {
    * Set via preset buttons or typed directly.
    */
   geminiTtsStyle: string;
+  /** Caption render style — persisted so the picker remembers the last choice. */
+  captionStyle: CaptionStyle;
 }
 
 export interface HistoryEntry {

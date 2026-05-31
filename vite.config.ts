@@ -8,6 +8,23 @@ export default defineConfig(({ mode }) => {
       server: {
         port: 5173,
         host: '0.0.0.0',
+        // ffmpeg.wasm needs SharedArrayBuffer → requires cross-origin isolation.
+        // Same headers must be sent in production hosting too.
+        headers: {
+          'Cross-Origin-Opener-Policy': 'same-origin',
+          'Cross-Origin-Embedder-Policy': 'credentialless',
+        },
+      },
+      preview: {
+        headers: {
+          'Cross-Origin-Opener-Policy': 'same-origin',
+          'Cross-Origin-Embedder-Policy': 'credentialless',
+        },
+      },
+      // Pre-bundle the ffmpeg loader so the dev server doesn't choke on
+      // dynamic UMD imports from inside @ffmpeg/ffmpeg.
+      optimizeDeps: {
+        exclude: ['@ffmpeg/ffmpeg', '@ffmpeg/util'],
       },
       plugins: [react()],
       define: {

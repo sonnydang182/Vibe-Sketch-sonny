@@ -1,4 +1,4 @@
-import { Scene, Language, SceneTiming } from "../types";
+import { Scene, Language, SceneTiming, CaptionStyle } from "../types";
 
 /**
  * Pure-JS caption + timing utilities. No external API needed.
@@ -193,3 +193,106 @@ export const probeAudioDuration = (audioUrl: string): Promise<number> =>
     el.onerror = () => reject(new Error('Failed to probe audio duration'));
     el.src = audioUrl;
   });
+
+// ---------------------------------------------------------------------------
+// ASS (Advanced SubStation Alpha) exporter — used for ffmpeg subtitles filter
+// ---------------------------------------------------------------------------
+
+/**
+ * Map our app aspect ratio to a render resolution. Lower than 1080p keeps
+ * wasm encoding fast enough to finish in a couple minutes for a short clip.
+ */
+export const renderResolution = (aspect: '16:9' | '9:16'): { w: number; h: number } =>
+  aspect === '16:9' ? { w: 1280, h: 720 } : { w: 720, h: 1280 };
+
+/** Convert seconds to ASS clock format: H:MM:SS.cc (centiseconds). */
+const formatAss = (seconds: number): string => {
+  const total = Math.max(0, seconds);
+  const cs = Math.round((total - Math.floor(total)) * 100);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = Math.floor(total % 60);
+  return `${h}:${pad(m)}:${pad(s)}.${pad(cs)}`;
+};
+
+/** Escape an ASS dialogue text body so braces don't get parsed as overrides. */
+const escapeAssText = (s: string): string =>
+  s.replace(/\\/g, '\\\\').replace(/\{/g, '\\{').replace(/\}/g, '\\}').replace(/\n/g, '\\N');
+
+/** ASS uses BGR ordering: &H00BBGGRR&. */
+const ASS_COLORS = {
+  white:  '&H00FFFFFF',
+  yellow: '&H0000F4FF',
+  red:    '&H000000FF',
+  cyan:   '&H00FFFF00',
+  green:  '&H0000FF00',
+  black:  '&H00000000',
+} as const;
+
+const fontSizeFor = (size: CaptionStyle['size'], height: number): number => {
+  // Sizes calibrated against 1280 / 720 base; scale roughly linearly.
+  const base = size === 'small' ? 36 : size === 'large' ? 72 : 52;
+  return Math.round(base * (height / 720));
+};
+
+/**
+ * ASS alignment numpad codes:
+ *   bottom: 2 (center-bottom)
+ *   middle: 5 (center-middle)
+ *   top:    8 (center-top)
+ */
+const alignmentFor = (pos: CaptionStyle['position']): number =>
+  pos === 'top' ? 8 : pos === 'middle' ? 5 : 2;
+
+/**
+ * Build a per-scene ASS subtitle file. One Dialogue line per scene — the whole
+ * voiceover text shows for the entire scene window. Karaoke per-word can be
+ * layered on top in a follow-up when WhisperWord timestamps are threaded
+ * through to the render call.
+ */
+export const buildASS = (
+  scenes: Scene[],
+  timings: SceneTiming[],
+  style: CaptionStyle,
+  aspect: '16:9' | '9:16',
+): string => {
+  const { w, h } = renderResolution(aspect);
+  const byId = new Map(scenes.map(s => [s.id, s] as const));
+
+  const fontSize = fontSizeFor(style.size, h);
+  const primaryColor = ASS_COLORS[style.textColor];
+  const outlineColor = ASS_COLORS.black;
+  const backColor = style.background ? '&H80000000' : '&H00000000';
+  const borderStyle = style.background ? 3 : 1; // 3 = opaque box, 1 = outline only
+  const outlineW = Math.max(2, Math.round(fontSize / 18));
+  const shadowW = 0;
+  const alignment = alignmentFor(style.position);
+  const marginV = Math.round(h * 0.05);
+
+  const header = [
+    '[Script Info]',
+    'ScriptType: v4.00+',
+    `PlayResX: ${w}`,
+    `PlayResY: ${h}`,
+    'ScaledBorderAndShadow: yes',
+    '',
+    '[V4+ Styles]',
+    'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
+    `Style: Default,Arial,${fontSize},${primaryColor},${ASS_COLORS.yellow},${outlineColor},${backColor},1,0,0,0,100,100,0,0,${borderStyle},${outlineW},${shadowW},${alignment},40,40,${marginV},1`,
+    '',
+    '[Events]',
+    'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
+  ].join('\n');
+
+  const dialogues = timings
+    .map(t => {
+      const scene = byId.get(t.sceneId);
+      if (!scene || !scene.voiceover.trim()) return null;
+      const text = escapeAssText(scene.voiceover.trim());
+      return `Dialogue: 0,${formatAss(t.start)},${formatAss(t.end)},Default,,0,0,0,,${text}`;
+    })
+    .filter(Boolean)
+    .join('\n');
+
+  return `${header}\n${dialogues}\n`;
+};
