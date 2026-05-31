@@ -14,7 +14,12 @@ interface StepVideoProps {
   language: Language;
   /** When false, the "Khớp với Whisper" button is disabled with an info hint. */
   hasWhisperProvider: boolean;
+  /** Whisper-aligned timings, when the user has run alignment. */
+  whisperTimings: SceneTiming[] | null;
+  isAligningWhisper: boolean;
+  whisperError?: string;
   onAlignWithWhisper: () => void;
+  onOpenSettings: () => void;
   onBack: () => void;
   onExportZip: () => void;
 }
@@ -39,7 +44,11 @@ export const StepVideo: React.FC<StepVideoProps> = ({
   audioUrl,
   language,
   hasWhisperProvider,
+  whisperTimings,
+  isAligningWhisper,
+  whisperError,
   onAlignWithWhisper,
+  onOpenSettings,
   onBack,
   onExportZip,
 }) => {
@@ -57,11 +66,13 @@ export const StepVideo: React.FC<StepVideoProps> = ({
       .catch(err => setAudioError(err?.message || String(err)));
   }, [audioUrl]);
 
-  // Estimated timings — what we show until Whisper is wired in.
+  // Prefer Whisper-aligned timings when the user has run alignment; otherwise
+  // fall back to the word-count estimate over the probed audio duration.
   const timings: SceneTiming[] = useMemo(() => {
+    if (whisperTimings && whisperTimings.length > 0) return whisperTimings;
     if (!audioDuration || audioDuration <= 0) return [];
     return estimateSceneTimings(scenes, audioDuration, language);
-  }, [scenes, audioDuration, language]);
+  }, [whisperTimings, scenes, audioDuration, language]);
 
   const downloadFile = (filename: string, mime: string, body: string) => {
     const blob = new Blob([body], { type: mime });
@@ -118,23 +129,38 @@ export const StepVideo: React.FC<StepVideoProps> = ({
       )}
 
       {/* Timing source + Whisper plug-in */}
-      <div className="bg-white/50 backdrop-blur-sm p-4 rounded-xl border-2 border-ink/10 flex flex-col md:flex-row md:items-center gap-3">
-        <div className="flex-1 space-y-1">
-          <div className="font-hand text-lg text-ink">Phương pháp khớp caption</div>
-          <div className="font-sans text-[12px] text-gray-600">
-            {timings[0]?.source === 'whisper'
-              ? 'Đã khớp bằng Whisper (word-level timestamps).'
-              : 'Đang dùng estimate theo word-count — đủ chính xác ~80%. Khớp Whisper sẽ chuẩn từng từ.'}
+      <div className="bg-white/50 backdrop-blur-sm p-4 rounded-xl border-2 border-ink/10 space-y-2">
+        <div className="flex flex-col md:flex-row md:items-center gap-3">
+          <div className="flex-1 space-y-1">
+            <div className="font-hand text-lg text-ink">Phương pháp khớp caption</div>
+            <div className="font-sans text-[12px] text-gray-600">
+              {timings[0]?.source === 'whisper'
+                ? '✓ Đã khớp bằng Whisper (Groq · whisper-large-v3-turbo, word-level timestamps).'
+                : hasWhisperProvider
+                  ? 'Đang dùng estimate theo word-count — đủ chính xác ~80%. Bấm bên phải để khớp chuẩn từng từ bằng Whisper.'
+                  : 'Đang dùng estimate theo word-count. Thêm Groq API key trong Cấu hình để khớp chuẩn bằng Whisper.'}
+            </div>
           </div>
+          {hasWhisperProvider ? (
+            <Button
+              variant="secondary"
+              onClick={onAlignWithWhisper}
+              isLoading={isAligningWhisper}
+              disabled={!audioUrl || isAligningWhisper}
+            >
+              🎯 {whisperTimings ? 'Khớp lại' : 'Khớp với Whisper'}
+            </Button>
+          ) : (
+            <Button variant="secondary" onClick={onOpenSettings}>
+              ⚙️ Thêm Groq Key
+            </Button>
+          )}
         </div>
-        <Button
-          variant="secondary"
-          onClick={onAlignWithWhisper}
-          disabled={!hasWhisperProvider || !audioUrl}
-          title={!hasWhisperProvider ? 'Chưa có Whisper provider — sẽ thêm trong PR sau' : ''}
-        >
-          🎯 Khớp với Whisper {!hasWhisperProvider && '(Sắp ra mắt)'}
-        </Button>
+        {whisperError && (
+          <div className="font-sans text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2">
+            ⚠ {whisperError}
+          </div>
+        )}
       </div>
 
       {/* Per-scene timing table */}

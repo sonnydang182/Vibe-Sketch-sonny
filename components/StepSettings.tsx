@@ -89,6 +89,24 @@ export const StepSettings: React.FC<StepSettingsProps> = ({ settings, onSave }) 
           </p>
         </div>
 
+        {/* Groq API Key — used by step 7 (Whisper alignment) */}
+        <div className="space-y-2 border-t border-ink/10 pt-6">
+          <label className="font-hand text-2xl text-ink block">
+            Groq API Key <span className="font-sans text-xs uppercase tracking-wider text-indigo-700 bg-indigo-100 px-1.5 py-0.5 rounded">Caption sync</span>
+          </label>
+          <input
+            type="password"
+            autoComplete="off"
+            value={draft.groqApiKey}
+            onChange={e => setDraft({ ...draft, groqApiKey: e.target.value })}
+            placeholder="gsk_..."
+            className="w-full bg-paper border-2 border-gray-300 focus:border-ink rounded-lg p-3 font-mono text-sm outline-none transition-colors"
+          />
+          <p className="font-sans text-xs text-gray-500">
+            Dùng Whisper (whisper-large-v3-turbo) ở bước 7 để khớp caption chuẩn từng từ với audio. ~$0.0004/phút. Lấy ở console.groq.com.
+          </p>
+        </div>
+
         {/* Image provider */}
         <div className="border-t border-ink/10 pt-6 space-y-3">
           <label className="font-hand text-2xl text-ink block">Model tạo ảnh</label>

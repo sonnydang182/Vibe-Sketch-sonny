@@ -83,6 +83,8 @@ export interface AppSettings {
   audioProvider: AudioProvider;
   coachioApiKey: string;
   geminiApiKey: string;
+  /** Groq API key — used for Whisper word-level alignment (step 7). */
+  groqApiKey: string;
   /** Coachio TTS voice id (e.g. Mark / Brittney). Empty = default Mark. */
   coachioTtsVoice: string;
   /**

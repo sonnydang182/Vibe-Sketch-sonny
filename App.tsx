@@ -8,7 +8,8 @@ import {
   Scene,
   AppSettings,
   HistoryEntry,
-  DashboardView
+  DashboardView,
+  SceneTiming,
 } from './types';
 import {
   generateViralTitles,
@@ -50,7 +51,10 @@ import { StepHistory } from './components/StepHistory';
 import { StepSettings } from './components/StepSettings';
 import { StepSetup } from './components/StepSetup';
 import { BackgroundJobBanner } from './components/BackgroundJobBanner';
-import { hasWhisperProvider } from './services/whisperService';
+import { hasWhisperProvider, createWhisperProvider } from './services/whisperService';
+import {
+  alignSceneTimingsToWhisper,
+} from './services/captionService';
 
 const SETTINGS_KEY = 'vibesketch.settings.v1';
 const HISTORY_KEY = 'vibesketch.history.v1';
@@ -61,6 +65,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   audioProvider: 'coachio_elevenlabs',
   coachioApiKey: '',
   geminiApiKey: '',
+  groqApiKey: '',
   coachioTtsVoice: COACHIO_VOICES[0].id,
   geminiTtsStyle: '',
 };
@@ -225,6 +230,11 @@ const App: React.FC = () => {
   const [thumbnailUrl, setThumbnailUrl] = useState<string | undefined>(undefined);
   const [isGeneratingThumbnail, setIsGeneratingThumbnail] = useState(false);
   const [thumbnailError, setThumbnailError] = useState<string | undefined>(undefined);
+
+  // Whisper alignment (step 7)
+  const [whisperTimings, setWhisperTimings] = useState<SceneTiming[] | null>(null);
+  const [isAligningWhisper, setIsAligningWhisper] = useState(false);
+  const [whisperError, setWhisperError] = useState<string | undefined>(undefined);
 
   // Push API keys into the service module whenever settings change.
   useEffect(() => {
@@ -959,6 +969,46 @@ const App: React.FC = () => {
     }
   };
 
+  /**
+   * Fetch the current combined voiceover blob, send it to the active Whisper
+   * provider, and align the returned word timestamps back onto the scene list.
+   */
+  const handleAlignWithWhisper = async () => {
+    if (!audioUrl) {
+      alert("Chưa có audio để khớp caption.");
+      return;
+    }
+    const provider = createWhisperProvider({
+      coachioApiKey: settings.coachioApiKey,
+      geminiApiKey: settings.geminiApiKey,
+      groqApiKey: settings.groqApiKey,
+    });
+    if (!provider) {
+      alert("Chưa cấu hình Whisper provider (cần Groq API key trong Cấu hình).");
+      return;
+    }
+
+    setIsAligningWhisper(true);
+    setWhisperError(undefined);
+    try {
+      const blob = await (await fetch(audioUrl)).blob();
+      const words = await provider.transcribeWithTimestamps(blob, config.language);
+      const timings = alignSceneTimingsToWhisper(scenes, words, config.language);
+      setWhisperTimings(timings);
+    } catch (e: any) {
+      console.error("Whisper alignment failed", e);
+      setWhisperError(e?.message || String(e));
+    } finally {
+      setIsAligningWhisper(false);
+    }
+  };
+
+  // Drop stale alignment whenever the underlying audio or scene list changes.
+  useEffect(() => {
+    setWhisperTimings(null);
+    setWhisperError(undefined);
+  }, [audioUrl, scenes]);
+
   const handleExportZip = async () => {
     const zip = new JSZip();
     const folderName = config.topic.replace(/[^a-z0-9]/gi, '_').toLowerCase() || 'project';
@@ -1133,8 +1183,13 @@ const App: React.FC = () => {
             hasWhisperProvider={hasWhisperProvider({
               coachioApiKey: settings.coachioApiKey,
               geminiApiKey: settings.geminiApiKey,
+              groqApiKey: settings.groqApiKey,
             })}
-            onAlignWithWhisper={() => alert("Sẽ wire khi chọn Whisper provider (Coachio / Groq / whisper.cpp WASM).")}
+            whisperTimings={whisperTimings}
+            isAligningWhisper={isAligningWhisper}
+            whisperError={whisperError}
+            onAlignWithWhisper={handleAlignWithWhisper}
+            onOpenSettings={() => setView('settings')}
             onBack={() => setStep(AppStep.GENERATE_AUDIO)}
             onExportZip={handleExportZip}
           />
