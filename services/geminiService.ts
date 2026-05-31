@@ -761,17 +761,27 @@ const createWavHeader = (dataLength: number, sampleRate: number = 24000) => {
 /**
  * Generate Speech using Gemini TTS
  */
-export const generateSpeech = async (text: string, language: Language): Promise<Blob | null> => {
+export const generateSpeech = async (
+  text: string,
+  language: Language,
+  styleInstruction?: string,
+): Promise<Blob | null> => {
   if (!getActiveGeminiKey()) {
     throw new Error("Cần Gemini API key để tạo voiceover (Coachio chưa hỗ trợ TTS).");
   }
   const ai = getAI();
   const config = LANGUAGE_CONFIG[language];
 
+  // Gemini TTS picks up natural-language style hints when they sit above the
+  // text to read. Empty / whitespace-only styles are skipped so the default
+  // voice character isn't shifted.
+  const style = styleInstruction?.trim();
+  const ttsText = style ? `${style}\n\n${text}` : text;
+
   try {
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash-preview-tts",
-      contents: [{ parts: [{ text: text }] }],
+      contents: [{ parts: [{ text: ttsText }] }],
       config: {
         responseModalities: [Modality.AUDIO],
         speechConfig: {

@@ -60,6 +60,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   coachioApiKey: '',
   geminiApiKey: '',
   coachioTtsVoice: COACHIO_VOICES[0].id,
+  geminiTtsStyle: '',
 };
 
 const DEFAULT_CONFIG: GenerationConfig = {
@@ -902,12 +903,15 @@ const App: React.FC = () => {
   };
 
   /**
-   * Gemini path: one combined TTS over the whole script (preserves single-take
-   * prosody — same voice, same pace from start to finish).
+   * Single combined TTS over the whole script for either provider. Cost-wise
+   * one call per project — per-scene splitting is intentionally NOT done here
+   * (10× the cost). Per-scene caption timing is recovered downstream by
+   * running Whisper alignment on the combined audio.
+   *
+   *  - Gemini: prepends settings.geminiTtsStyle as a tone instruction.
+   *  - Coachio (ElevenLabs v2): uses settings.coachioTtsVoice for the voice id.
    */
   const handleGenerateAudio = async (overrideScript?: string) => {
-    // Always start from the live derived script so it picks up the latest
-    // voiceover edits made in StepVisuals.
     const text = (overrideScript && overrideScript.trim())
       ? overrideScript.trim()
       : scenes.map(s => s.voiceover).filter(Boolean).join(' ');
@@ -920,7 +924,23 @@ const App: React.FC = () => {
     setIsLoading(true);
     try {
       if (audioUrl) URL.revokeObjectURL(audioUrl);
-      const blob = await generateSpeech(text, config.language);
+
+      let blob: Blob | null = null;
+      if (settings.audioProvider === 'coachio_elevenlabs') {
+        const key = settings.coachioApiKey?.trim();
+        if (!key) {
+          alert("Cần Coachio API key (vào Cấu hình để dán).");
+          return;
+        }
+        blob = await generateAudioWithCoachio({
+          apiKey: key,
+          text,
+          voice: settings.coachioTtsVoice || COACHIO_VOICES[0].id,
+        });
+      } else {
+        blob = await generateSpeech(text, config.language, settings.geminiTtsStyle);
+      }
+
       if (blob) {
         setAudioBlob(blob);
         const url = URL.createObjectURL(blob);
@@ -932,72 +952,6 @@ const App: React.FC = () => {
     } catch (e: any) {
       console.error(e);
       alert(`Lỗi khi tạo audio: ${e?.message || e}`);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  /**
-   * Coachio path: per-scene TTS. Each scene gets its own audio clip — needed
-   * for downstream video assembly (caption sync, image-per-scene timing).
-   * Runs sequentially to avoid hammering the task queue; each scene also
-   * stores progress on the scene object so the UI can show per-row state.
-   */
-  const handleGenerateSceneAudios = async (
-    onlySceneId?: string,
-  ): Promise<void> => {
-    const key = settings.coachioApiKey?.trim();
-    if (!key) {
-      alert("Cần Coachio API key (vào Cấu hình để dán).");
-      return;
-    }
-    const voice = settings.coachioTtsVoice || COACHIO_VOICES[0].id;
-
-    const targets = onlySceneId
-      ? scenes.filter(s => s.id === onlySceneId)
-      : scenes.filter(s => s.voiceover?.trim());
-
-    if (targets.length === 0) {
-      alert("Không có lời dẫn để tạo audio.");
-      return;
-    }
-
-    setIsLoading(true);
-    try {
-      for (const scene of targets) {
-        setScenes(prev => prev.map(s =>
-          s.id === scene.id
-            ? { ...s, isGeneratingAudio: true, audioError: undefined }
-            : s,
-        ));
-        try {
-          const blob = await generateAudioWithCoachio({
-            apiKey: key,
-            text: scene.voiceover,
-            voice,
-          });
-          const url = URL.createObjectURL(blob);
-          setScenes(prev => prev.map(s =>
-            s.id === scene.id
-              ? {
-                  ...s,
-                  isGeneratingAudio: false,
-                  audioUrl: url,
-                  audioForText: scene.voiceover,
-                  audioError: undefined,
-                }
-              : s,
-          ));
-        } catch (e: any) {
-          console.error(`Coachio TTS failed for scene ${scene.id}`, e);
-          const msg = (e?.message || String(e)).slice(0, 200);
-          setScenes(prev => prev.map(s =>
-            s.id === scene.id
-              ? { ...s, isGeneratingAudio: false, audioError: msg }
-              : s,
-          ));
-        }
-      }
     } finally {
       setIsLoading(false);
     }
@@ -1034,22 +988,11 @@ const App: React.FC = () => {
       folder.file("thumbnail.png", base64Data, { base64: true });
     }
 
-    // 3. Voiceover — combined (Gemini path) and/or per-scene clips (Coachio path).
-    if (audioBlob) folder.file("voiceover.wav", audioBlob);
-    const audioFolder = folder.folder("audio");
-    if (audioFolder) {
-      await Promise.all(scenes.map(async (scene, idx) => {
-        if (!scene.audioUrl) return;
-        try {
-          const res = await fetch(scene.audioUrl);
-          const blob = await res.blob();
-          // ElevenLabs returns mp3; keep extension generic via Content-Type.
-          const ext = blob.type.includes("wav") ? "wav" : "mp3";
-          audioFolder.file(`scene_${String(idx + 1).padStart(2, '0')}.${ext}`, blob);
-        } catch (e) {
-          console.warn(`Skipping scene ${idx + 1} audio in export`, e);
-        }
-      }));
+    // 3. Combined voiceover (single file — both Gemini and Coachio go here).
+    // Per-scene timing is recovered downstream via Whisper alignment.
+    if (audioBlob) {
+      const ext = audioBlob.type.includes("wav") ? "wav" : "mp3";
+      folder.file(`voiceover.${ext}`, audioBlob);
     }
 
     try {
@@ -1164,7 +1107,6 @@ const App: React.FC = () => {
             audioUrl={audioUrl}
             isLoading={isLoading}
             onGenerateAudio={handleGenerateAudio}
-            onGenerateSceneAudios={handleGenerateSceneAudios}
             onExportZip={handleExportZip}
             onBack={() => setStep(AppStep.GENERATE_THUMBNAIL)}
             duration={config.duration}

@@ -25,13 +25,21 @@ const AUDIO_PROVIDERS: { id: AudioProvider; label: string; description: string }
   {
     id: 'coachio_elevenlabs',
     label: 'Coachio · ElevenLabs TTS (mặc định)',
-    description: 'Tạo voiceover qua Coachio (ElevenLabs v2). Mỗi cảnh 1 file audio — chuẩn bị cho luồng tạo video tự động.',
+    description: 'Tạo voiceover qua Coachio (ElevenLabs v2). Chỉ 1 file audio gộp — caption khớp scene sẽ ghép sau bằng Whisper.',
   },
   {
     id: 'gemini',
     label: 'Gemini TTS',
     description: 'Gộp toàn bộ kịch bản thành 1 file voiceover liền mạch. Cần Gemini API Key.',
   },
+];
+
+/** Predefined Gemini TTS style presets. Click to set the textarea below. */
+const GEMINI_STYLE_PRESETS: { id: string; label: string; instruction: string }[] = [
+  { id: 'normal', label: 'Bình thường', instruction: '' },
+  { id: 'professional', label: 'Chuyên nghiệp', instruction: 'Read the following clearly, like a professional news anchor — confident, neutral, well-paced.' },
+  { id: 'inspirational', label: 'Truyền cảm hứng', instruction: 'Read the following with energy and passion, like a motivational speaker — warm, engaging, varied intonation.' },
+  { id: 'storyteller', label: 'Kể chuyện', instruction: 'Read the following warmly like a storyteller, with natural pauses and an engaging, intimate tone.' },
 ];
 
 export const StepSettings: React.FC<StepSettingsProps> = ({ settings, onSave }) => {
@@ -161,7 +169,43 @@ export const StepSettings: React.FC<StepSettingsProps> = ({ settings, onSave }) 
                 ))}
               </div>
               <p className="font-sans text-[11px] text-gray-500">
-                Mỗi cảnh sẽ được TTS riêng → bạn có audio từng đoạn để dựng video / khớp caption sau này.
+                Toàn bộ kịch bản được tạo bằng 1 lần TTS (chi phí cố định) — caption khớp scene sẽ ghép sau bằng Whisper.
+              </p>
+            </div>
+          )}
+
+          {/* Gemini style picker — only when Gemini TTS is selected */}
+          {draft.audioProvider === 'gemini' && (
+            <div className="space-y-2 pt-3">
+              <label className="font-hand text-lg text-ink block">Phong cách đọc (Gemini TTS)</label>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {GEMINI_STYLE_PRESETS.map(preset => {
+                  const active = draft.geminiTtsStyle.trim() === preset.instruction.trim();
+                  return (
+                    <button
+                      key={preset.id}
+                      onClick={() => setDraft({ ...draft, geminiTtsStyle: preset.instruction })}
+                      className={`
+                        p-2 rounded-lg border-2 text-center transition-all
+                        ${active
+                          ? 'bg-ink text-paper border-ink shadow-md'
+                          : 'bg-white border-gray-200 text-gray-600 hover:border-gray-400'}
+                      `}
+                    >
+                      <div className="font-hand text-sm">{preset.label}</div>
+                    </button>
+                  );
+                })}
+              </div>
+              <textarea
+                value={draft.geminiTtsStyle}
+                onChange={e => setDraft({ ...draft, geminiTtsStyle: e.target.value })}
+                placeholder="Hoặc tự nhập hướng dẫn phong cách — vd: 'Read calmly with long pauses, like a meditation guide'."
+                rows={2}
+                className="w-full bg-paper border-2 border-gray-300 focus:border-ink rounded-lg p-3 font-sans text-sm outline-none transition-colors resize-vertical"
+              />
+              <p className="font-sans text-[11px] text-gray-500">
+                Hướng dẫn này được ghép vào đầu prompt TTS. Bỏ trống = giọng mặc định của ngôn ngữ. Tiếng Anh thường ăn hơn tiếng Việt khi mô tả style.
               </p>
             </div>
           )}

@@ -73,6 +73,12 @@ export interface AppSettings {
   geminiApiKey: string;
   /** Coachio TTS voice id (e.g. Mark / Brittney). Empty = default Mark. */
   coachioTtsVoice: string;
+  /**
+   * Free-text style instruction prepended to the Gemini TTS prompt
+   * (e.g. "Read in a professional news-anchor tone"). Empty = no instruction.
+   * Set via preset buttons or typed directly.
+   */
+  geminiTtsStyle: string;
 }
 
 export interface HistoryEntry {
