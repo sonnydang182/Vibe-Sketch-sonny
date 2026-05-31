@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button } from './Button';
+import { VideoPreview } from './VideoPreview';
 import {
   Scene,
   SceneTiming,
@@ -357,11 +358,35 @@ export const StepVideo: React.FC<StepVideoProps> = ({
         </label>
       </section>
 
-      {/* 3. Per-scene timing table */}
+      {/* 3. Live preview — assembled scenes + audio + captions */}
+      <section className="bg-white/50 backdrop-blur-sm p-4 rounded-xl border-2 border-ink/10 space-y-3">
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-[10px] uppercase tracking-wider text-gray-400">Bước 3</span>
+          <div className="font-hand text-lg text-ink">Preview</div>
+          <span className="font-sans text-[11px] text-gray-500">
+            (xem ráp thực tế trước khi render)
+          </span>
+        </div>
+        {canCaption && audioUrl ? (
+          <VideoPreview
+            scenes={scenes}
+            timings={timings}
+            audioUrl={audioUrl}
+            captionStyle={captionStyle}
+            aspectRatio={aspectRatio}
+          />
+        ) : (
+          <div className="text-center py-8 font-hand text-gray-400">
+            Cần audio + scenes có ảnh để preview.
+          </div>
+        )}
+      </section>
+
+      {/* 4. Per-scene timing table */}
       <section className="bg-white/50 backdrop-blur-sm rounded-xl border-2 border-ink/10 overflow-hidden">
         <div className="px-4 py-2 flex items-center justify-between gap-2 bg-ink/[0.04] border-b border-ink/10">
           <div className="flex items-center gap-2">
-            <span className="font-mono text-[10px] uppercase tracking-wider text-gray-400">Bước 3</span>
+            <span className="font-mono text-[10px] uppercase tracking-wider text-gray-400">Bước 4</span>
             <span className="font-hand text-lg text-ink">Timing per-scene</span>
             <span className="font-sans text-[11px] text-gray-500">
               {audioDuration ? `Audio: ${audioDuration.toFixed(2)}s` : '...'}
@@ -401,10 +426,10 @@ export const StepVideo: React.FC<StepVideoProps> = ({
         </div>
       </section>
 
-      {/* 4. Render mp4 */}
+      {/* 5. Render mp4 */}
       <section className="bg-paper paper-texture p-5 rounded-xl border-2 border-ink shadow-md space-y-3">
         <div className="flex items-center gap-2">
-          <span className="font-mono text-[10px] uppercase tracking-wider text-gray-500">Bước 4</span>
+          <span className="font-mono text-[10px] uppercase tracking-wider text-gray-500">Bước 5</span>
           <div className="font-hand text-xl text-ink">Render video mp4</div>
         </div>
 

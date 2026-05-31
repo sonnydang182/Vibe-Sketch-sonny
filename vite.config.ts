@@ -21,11 +21,6 @@ export default defineConfig(({ mode }) => {
           'Cross-Origin-Embedder-Policy': 'credentialless',
         },
       },
-      // Pre-bundle the ffmpeg loader so the dev server doesn't choke on
-      // dynamic UMD imports from inside @ffmpeg/ffmpeg.
-      optimizeDeps: {
-        exclude: ['@ffmpeg/ffmpeg', '@ffmpeg/util'],
-      },
       plugins: [react()],
       define: {
         'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),

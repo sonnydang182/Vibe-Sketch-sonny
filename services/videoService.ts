@@ -18,14 +18,12 @@ import { buildASS, renderResolution } from "./captionService";
  * render-state, so this is a belt + suspenders.
  */
 
-const FFMPEG_CDN = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd";
-
 let ffmpegInstance: FFmpeg | null = null;
 let isBusy = false;
 
 /**
  * Load and cache the FFmpeg singleton. The first call downloads and JIT-loads
- * the core (~10s); subsequent calls return instantly.
+ * the core (~3-5s when bundled same-origin); subsequent calls return instantly.
  */
 const getFFmpeg = async (
   onProgress?: (msg: string) => void,
@@ -39,8 +37,16 @@ const getFFmpeg = async (
 
   onProgress?.("Tải ffmpeg core...");
   const inst = new FFmpeg();
-  const coreURL = await toBlobURL(`${FFMPEG_CDN}/ffmpeg-core.js`, "text/javascript");
-  const wasmURL = await toBlobURL(`${FFMPEG_CDN}/ffmpeg-core.wasm`, "application/wasm");
+  // Files served from public/ffmpeg-core/ — same-origin. The copy-ffmpeg-core
+  // npm script populates them on postinstall / predev / prebuild.
+  // toBlobURL guarantees the worker's importScripts() gets correct MIME types.
+  const coreURL = await toBlobURL("/ffmpeg-core/ffmpeg-core.js", "text/javascript");
+  const wasmURL = await toBlobURL("/ffmpeg-core/ffmpeg-core.wasm", "application/wasm");
+  inst.on("log", ({ message }) => {
+    // Surface ffmpeg log lines into the browser console so a real failure
+    // (codec missing, bad demuxer arg, etc.) doesn't get swallowed.
+    console.debug("[ffmpeg]", message);
+  });
   await inst.load({ coreURL, wasmURL });
   ffmpegInstance = inst;
   onProgress?.("ffmpeg ready");

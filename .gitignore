@@ -28,3 +28,6 @@ dist-ssr
 *.sln
 *.sw?
 .gstack/
+
+# Auto-copied from node_modules by scripts/copy-ffmpeg-core.mjs
+/public/ffmpeg-core/
