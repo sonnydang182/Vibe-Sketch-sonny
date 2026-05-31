@@ -311,18 +311,22 @@ const App: React.FC = () => {
         return trimmed;
       });
 
-      // Persist images + thumbnail to IndexedDB so they survive F5.
+      // Persist images + thumbnail + audio to IndexedDB so they survive F5.
       const sceneImages: Record<string, string> = {};
       scenes.forEach(s => {
         if (s.imageUrl) sceneImages[s.id] = s.imageUrl;
       });
-      saveProjectAssets(id, { sceneImages, thumbnailUrl });
+      saveProjectAssets(id, {
+        sceneImages,
+        thumbnailUrl,
+        audioBlob: audioBlob || undefined,
+      });
 
       if (!activeProjectId) setActiveProjectId(id);
     }, 800);
 
     return () => clearTimeout(timer);
-  }, [config, titles, scenes, thumbnailUrl, fullScript, step, lastGeneratedTopic, lastGeneratedTitleId, activeProjectId]);
+  }, [config, titles, scenes, thumbnailUrl, audioBlob, fullScript, step, lastGeneratedTopic, lastGeneratedTitleId, activeProjectId]);
 
   // On mount, hydrate the active project's assets from IndexedDB so a refresh
   // doesn't lose generated images. We do this once when the activeProjectId is
@@ -344,6 +348,11 @@ const App: React.FC = () => {
             ? s
             : { ...s, imageUrl: assets.sceneImages[s.id] }))
         );
+      }
+      if (assets.audioBlob) {
+        // Object URL lives only this session — recreate from the saved Blob.
+        setAudioBlob(prev => prev ?? assets.audioBlob ?? null);
+        setAudioUrl(prev => prev ?? URL.createObjectURL(assets.audioBlob!));
       }
     })();
   }, [activeProjectId]);
@@ -403,7 +412,7 @@ const App: React.FC = () => {
     setStep(entry.step ?? AppStep.INPUT_TOPIC);
     setView('create');
 
-    // Async hydrate images from IndexedDB
+    // Async hydrate images + audio from IndexedDB
     (async () => {
       const assets = await loadProjectAssets(entry.id);
       if (!assets) return;
@@ -412,6 +421,10 @@ const App: React.FC = () => {
         setScenes(prev =>
           prev.map(s => ({ ...s, imageUrl: assets.sceneImages[s.id] ?? s.imageUrl }))
         );
+      }
+      if (assets.audioBlob) {
+        setAudioBlob(assets.audioBlob);
+        setAudioUrl(URL.createObjectURL(assets.audioBlob));
       }
     })();
   };

@@ -33,6 +33,12 @@ export interface ProjectAssets {
   /** sceneId → image data URL */
   sceneImages: Record<string, string>;
   thumbnailUrl?: string;
+  /**
+   * Combined voiceover blob (mp3 / wav depending on provider).
+   * Stored natively by IndexedDB — no base64 conversion needed.
+   * The accompanying object URL is recreated at hydrate time.
+   */
+  audioBlob?: Blob;
 }
 
 const tx = (db: IDBDatabase, mode: IDBTransactionMode) =>
