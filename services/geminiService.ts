@@ -69,12 +69,17 @@ const LANGUAGE_CONFIG: Record<Language, {
     voiceName: string;
 }> = {
     'Vietnamese': {
-        role: "viral YouTube strategist for the Vietnamese market",
+        role: "viral YouTube strategist for the Vietnamese market — write like a thoughtful Vietnamese creator, not like a marketing template",
         formulas: `
-        1. Extreme Transformation: [Hành động] + [Đối tượng] + [Trạng thái: LẠNH LÙNG / BẤT KHẢ CHIẾN BẠI]
-        2. Cruel Truth: Tại sao bạn mãi [Thất bại/Nghèo khó] dù đã [Cố gắng]?
-        3. Wake-up Call: [Làm ngay đi] nếu không muốn [Hậu quả đáng sợ].`,
-        scriptRules: "Tone: Street-smart, engaging, uses Vietnamese internet slang if appropriate, distinctively Vietnamese perspective.",
+        Pick the formula that fits the topic naturally. Don't force a heavy hook on a gentle topic.
+        1. Biến đổi cực hạn: [Hành động] + [Đối tượng] + [Trạng thái mới] — VD: "Bỏ điện thoại 7 ngày, đầu óc trở nên sắc bén".
+        2. Sự thật phũ phàng: "Tại sao bạn mãi [trạng thái xấu] dù đã [cố gắng]?" — chỉ dùng khi chủ đề thực sự nặng.
+        3. Thách đố / chứng minh: "Cho tôi 5 phút, tôi sẽ chứng minh [điều bất ngờ]." (hoặc biến thể "2 phút", "60 giây").
+        4. Lời cảnh tỉnh: "[Hành động ngay] nếu không muốn [hậu quả]." — dùng tiết chế, đừng doạ thái quá.
+        5. Tiêu đề nhẹ / kể chuyện: nếu chủ đề không hợp 4 công thức trên, viết một tiêu đề tự nhiên (kể chuyện, câu hỏi tò mò, hoặc nhận định ngắn) — vẫn cuốn nhưng không "câu view" lộ liễu.
+
+        Trộn đa dạng: trong 5 tiêu đề trả về, KHÔNG dùng cùng một công thức 2 lần liên tiếp. Nếu chủ đề nhẹ nhàng, ưu tiên #5.`,
+        scriptRules: "Tone: Street-smart, engaging, uses Vietnamese internet slang if appropriate, distinctively Vietnamese perspective. Tránh sáo rỗng kiểu 'BẠN SẼ KHÔNG TIN' / 'BÍ MẬT KHÔNG AI NÓI'.",
         visualText: "Text inside image must be Vietnamese.",
         voiceName: "Kore"
     },
@@ -110,10 +115,12 @@ export const generateViralTitles = async (topic: string, tone: string, language:
     Act as a ${config.role}.
     Generate 5 viral YouTube titles in ${language} based on the keyword: "${topic}".
     Tone: ${tone}.
-    Use strictly one of the following 3 formulas adapted for ${language} culture:
+
+    Title formulas to draw from (pick whichever fits naturally — mix them, don't repeat the same one):
     ${config.formulas}
 
-    Capitalize POWER WORDS. Return ONLY a JSON array of 5 strings, like ["Title 1", "Title 2", ...].
+    Capitalize 1–2 POWER WORDS in each title for emphasis (not every word). Avoid clickbait clichés.
+    Return ONLY a JSON array of 5 strings, like ["Title 1", "Title 2", ...].
   `;
 
   const coachioKey = getActiveCoachioKey();

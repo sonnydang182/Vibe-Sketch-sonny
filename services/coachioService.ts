@@ -284,3 +284,86 @@ export const generateImageWithCoachio = async (params: {
   const urls = await pollTaskStatus(params.apiKey, taskId);
   return await fetchAsDataUrl(urls[0]);
 };
+
+// ---------------------------------------------------------------------------
+// Audio (text-to-speech) via Coachio + ElevenLabs
+// ---------------------------------------------------------------------------
+
+/** Built-in voice ids for the elevenlabs_text_to_speech_v2 model. */
+export const COACHIO_VOICES = [
+  { id: "UgBBYS2sOqTuMpoF3BR0", label: "Mark (EN)", language: "English" },
+  { id: "kPzsL2i3teMYv0FxEYQ6", label: "Brittney (EN)", language: "English" },
+] as const;
+
+export type CoachioVoiceId = (typeof COACHIO_VOICES)[number]["id"];
+
+interface SubmitAudioOptions {
+  apiKey: string;
+  text: string;
+  voice: string;
+  stability?: number;
+  similarityBoost?: number;
+  style?: number;
+  speed?: number;
+}
+
+/** Submit a TTS task to Coachio. Returns task_id. */
+export const submitAudioTask = async (
+  opts: SubmitAudioOptions,
+): Promise<string> => {
+  const body = {
+    task_type: "audio",
+    prompt: opts.text,
+    ai_model_config: {
+      model_identifier: "elevenlabs_text_to_speech_v2",
+      generation_mode: "standard",
+      aspect_ratio: "16:9",
+      tts_voice: opts.voice,
+      tts_text: opts.text,
+      similarity_boost: opts.similarityBoost ?? 0.75,
+      tts_style: opts.style ?? 0,
+      speed: opts.speed ?? 1,
+      stability: opts.stability ?? 0.5,
+    },
+  };
+
+  const res = await fetch(`${COACHIO_BASE}/task/submit`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-API-Key": opts.apiKey,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Coachio audio submit failed (${res.status}): ${text}`);
+  }
+  const data: SubmitTaskResponse = await res.json();
+  if (!data.task_id) throw new Error("Coachio audio submit: missing task_id");
+  return data.task_id;
+};
+
+/**
+ * High-level helper: submit a TTS task, poll, fetch the result, and return a
+ * Blob ready to drop into an <audio> element or zip up for export.
+ */
+export const generateAudioWithCoachio = async (params: {
+  apiKey: string;
+  text: string;
+  voice: string;
+  stability?: number;
+  similarityBoost?: number;
+  style?: number;
+  speed?: number;
+}): Promise<Blob> => {
+  if (!params.apiKey) throw new Error("Coachio API key is missing");
+  if (!params.text?.trim()) throw new Error("Coachio audio: empty text");
+
+  const taskId = await submitAudioTask(params);
+  const urls = await pollTaskStatus(params.apiKey, taskId);
+  const res = await fetch(urls[0]);
+  if (!res.ok) throw new Error(`Failed to fetch audio result: ${res.status}`);
+  return await res.blob();
+};

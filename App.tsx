@@ -34,6 +34,10 @@ import {
   pruneOrphanAssets,
   ProjectAssets,
 } from './data/assetStorage';
+import {
+  generateAudioWithCoachio,
+  COACHIO_VOICES,
+} from './services/coachioService';
 
 import { StepInput } from './components/StepInput';
 import { StepTitles } from './components/StepTitles';
@@ -43,6 +47,7 @@ import { StepThumbnail } from './components/StepThumbnail';
 import { StepAudio } from './components/StepAudio';
 import { StepHistory } from './components/StepHistory';
 import { StepSettings } from './components/StepSettings';
+import { StepSetup } from './components/StepSetup';
 import { BackgroundJobBanner } from './components/BackgroundJobBanner';
 
 const SETTINGS_KEY = 'vibesketch.settings.v1';
@@ -51,8 +56,10 @@ const ACTIVE_PROJECT_KEY = 'vibesketch.activeProjectId.v1';
 
 const DEFAULT_SETTINGS: AppSettings = {
   imageProvider: 'coachio_gpt_image_2',
+  audioProvider: 'coachio_elevenlabs',
   coachioApiKey: '',
   geminiApiKey: '',
+  coachioTtsVoice: COACHIO_VOICES[0].id,
 };
 
 const DEFAULT_CONFIG: GenerationConfig = {
@@ -577,6 +584,22 @@ const App: React.FC = () => {
     setTitles(prev => prev.map(t => ({ ...t, selected: t.id === id })));
   };
 
+  /**
+   * Commit the user-typed custom title into the title list. We keep it as a
+   * synthetic entry with a stable id so downstream code (script gen cache,
+   * history) treats it the same as an AI-generated title.
+   */
+  const handleSubmitCustomTitle = (text: string) => {
+    const CUSTOM_ID = 'custom-title';
+    if (!text.trim()) return;
+    setTitles(prev => {
+      const others = prev.filter(t => t.id !== CUSTOM_ID).map(t => ({ ...t, selected: false }));
+      return [...others, { id: CUSTOM_ID, text: text.trim(), selected: true }];
+    });
+    // Invalidate the script cache so the new title triggers a fresh script.
+    setLastGeneratedTitleId('');
+  };
+
   const handleGenerateScript = async () => {
     const selectedTitle = titles.find(t => t.selected);
     if (!selectedTitle) return;
@@ -878,6 +901,10 @@ const App: React.FC = () => {
     setStep(AppStep.GENERATE_AUDIO);
   };
 
+  /**
+   * Gemini path: one combined TTS over the whole script (preserves single-take
+   * prosody — same voice, same pace from start to finish).
+   */
   const handleGenerateAudio = async (overrideScript?: string) => {
     // Always start from the live derived script so it picks up the latest
     // voiceover edits made in StepVisuals.
@@ -902,9 +929,75 @@ const App: React.FC = () => {
       } else {
         alert("Không thể tạo âm thanh. Thử lại sau.");
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error(e);
-      alert("Lỗi khi tạo audio.");
+      alert(`Lỗi khi tạo audio: ${e?.message || e}`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  /**
+   * Coachio path: per-scene TTS. Each scene gets its own audio clip — needed
+   * for downstream video assembly (caption sync, image-per-scene timing).
+   * Runs sequentially to avoid hammering the task queue; each scene also
+   * stores progress on the scene object so the UI can show per-row state.
+   */
+  const handleGenerateSceneAudios = async (
+    onlySceneId?: string,
+  ): Promise<void> => {
+    const key = settings.coachioApiKey?.trim();
+    if (!key) {
+      alert("Cần Coachio API key (vào Cấu hình để dán).");
+      return;
+    }
+    const voice = settings.coachioTtsVoice || COACHIO_VOICES[0].id;
+
+    const targets = onlySceneId
+      ? scenes.filter(s => s.id === onlySceneId)
+      : scenes.filter(s => s.voiceover?.trim());
+
+    if (targets.length === 0) {
+      alert("Không có lời dẫn để tạo audio.");
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      for (const scene of targets) {
+        setScenes(prev => prev.map(s =>
+          s.id === scene.id
+            ? { ...s, isGeneratingAudio: true, audioError: undefined }
+            : s,
+        ));
+        try {
+          const blob = await generateAudioWithCoachio({
+            apiKey: key,
+            text: scene.voiceover,
+            voice,
+          });
+          const url = URL.createObjectURL(blob);
+          setScenes(prev => prev.map(s =>
+            s.id === scene.id
+              ? {
+                  ...s,
+                  isGeneratingAudio: false,
+                  audioUrl: url,
+                  audioForText: scene.voiceover,
+                  audioError: undefined,
+                }
+              : s,
+          ));
+        } catch (e: any) {
+          console.error(`Coachio TTS failed for scene ${scene.id}`, e);
+          const msg = (e?.message || String(e)).slice(0, 200);
+          setScenes(prev => prev.map(s =>
+            s.id === scene.id
+              ? { ...s, isGeneratingAudio: false, audioError: msg }
+              : s,
+          ));
+        }
+      }
     } finally {
       setIsLoading(false);
     }
@@ -941,8 +1034,23 @@ const App: React.FC = () => {
       folder.file("thumbnail.png", base64Data, { base64: true });
     }
 
-    // 3. Combined voiceover (single file)
+    // 3. Voiceover — combined (Gemini path) and/or per-scene clips (Coachio path).
     if (audioBlob) folder.file("voiceover.wav", audioBlob);
+    const audioFolder = folder.folder("audio");
+    if (audioFolder) {
+      await Promise.all(scenes.map(async (scene, idx) => {
+        if (!scene.audioUrl) return;
+        try {
+          const res = await fetch(scene.audioUrl);
+          const blob = await res.blob();
+          // ElevenLabs returns mp3; keep extension generic via Content-Type.
+          const ext = blob.type.includes("wav") ? "wav" : "mp3";
+          audioFolder.file(`scene_${String(idx + 1).padStart(2, '0')}.${ext}`, blob);
+        } catch (e) {
+          console.warn(`Skipping scene ${idx + 1} audio in export`, e);
+        }
+      }));
+    }
 
     try {
       const content = await zip.generateAsync({ type: "blob" });
@@ -993,6 +1101,7 @@ const App: React.FC = () => {
           <StepTitles
             titles={titles}
             onSelect={handleSelectTitle}
+            onSubmitCustom={handleSubmitCustomTitle}
             onNext={handleGenerateScript}
             onBack={() => setStep(AppStep.INPUT_TOPIC)}
             isLoading={isLoading}
@@ -1055,11 +1164,14 @@ const App: React.FC = () => {
             audioUrl={audioUrl}
             isLoading={isLoading}
             onGenerateAudio={handleGenerateAudio}
+            onGenerateSceneAudios={handleGenerateSceneAudios}
             onExportZip={handleExportZip}
             onBack={() => setStep(AppStep.GENERATE_THUMBNAIL)}
             duration={config.duration}
             onChangeDuration={(d) => setConfig(prev => ({ ...prev, duration: d }))}
+            audioProvider={settings.audioProvider}
             hasGeminiKey={hasGeminiKey}
+            hasCoachioKey={hasCoachioKey}
             onOpenSettings={() => setView('settings')}
           />
         );
@@ -1089,6 +1201,9 @@ const App: React.FC = () => {
           onSave={(s) => setSettings(s)}
         />
       );
+    }
+    if (view === 'setup') {
+      return <StepSetup />;
     }
     return renderCreateView();
   };
@@ -1131,6 +1246,9 @@ const App: React.FC = () => {
           } />
           <NavButton id="history" label="Lịch sử" icon={
             <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          } />
+          <NavButton id="setup" label="Setup" icon={
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
           } />
           <NavButton id="settings" label="Cấu hình" icon={
             <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
@@ -1184,6 +1302,7 @@ const App: React.FC = () => {
       <nav className="md:hidden flex items-center justify-around gap-1 bg-white/60 border-b border-ink/10 px-2 py-1">
         <NavButton id="create" label="Tạo" icon={<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"/></svg>} />
         <NavButton id="history" label="Lịch sử" icon={<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>} />
+        <NavButton id="setup" label="Setup" icon={<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>} />
         <NavButton id="settings" label="Cấu hình" icon={<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>} />
       </nav>
 

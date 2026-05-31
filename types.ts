@@ -41,6 +41,7 @@ export enum AppStep {
 export type Language = 'Vietnamese' | 'English' | 'Japanese';
 
 export type ImageProvider = 'gemini' | 'coachio_gpt_image_2';
+export type AudioProvider = 'gemini' | 'coachio_elevenlabs';
 
 export type CharacterId =
   | 'stickman'
@@ -67,8 +68,11 @@ export interface GenerationConfig {
 
 export interface AppSettings {
   imageProvider: ImageProvider;
+  audioProvider: AudioProvider;
   coachioApiKey: string;
   geminiApiKey: string;
+  /** Coachio TTS voice id (e.g. Mark / Brittney). Empty = default Mark. */
+  coachioTtsVoice: string;
 }
 
 export interface HistoryEntry {
@@ -86,4 +90,4 @@ export interface HistoryEntry {
   lastGeneratedTitleId: string;
 }
 
-export type DashboardView = 'create' | 'history' | 'settings';
+export type DashboardView = 'create' | 'history' | 'settings' | 'setup';

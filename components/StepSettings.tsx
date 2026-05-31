@@ -1,22 +1,36 @@
 import React, { useState } from 'react';
 import { Button } from './Button';
-import { AppSettings, ImageProvider } from '../types';
+import { AppSettings, ImageProvider, AudioProvider } from '../types';
+import { COACHIO_VOICES } from '../services/coachioService';
 
 interface StepSettingsProps {
   settings: AppSettings;
   onSave: (settings: AppSettings) => void;
 }
 
-const PROVIDERS: { id: ImageProvider; label: string; description: string }[] = [
+const IMAGE_PROVIDERS: { id: ImageProvider; label: string; description: string }[] = [
   {
     id: 'coachio_gpt_image_2',
     label: 'Coachio · GPT Image 2 (mặc định)',
-    description: 'Tạo ảnh qua API Coachio (model gpt_image_2). Chỉ cần Coachio API Key.',
+    description: 'Tạo ảnh qua Coachio (model gpt_image_2). Chỉ cần Coachio API Key.',
   },
   {
     id: 'gemini',
     label: 'Gemini 3 Pro Image',
     description: 'Tạo ảnh trực tiếp qua Gemini. Cần Gemini API Key.',
+  },
+];
+
+const AUDIO_PROVIDERS: { id: AudioProvider; label: string; description: string }[] = [
+  {
+    id: 'coachio_elevenlabs',
+    label: 'Coachio · ElevenLabs TTS (mặc định)',
+    description: 'Tạo voiceover qua Coachio (ElevenLabs v2). Mỗi cảnh 1 file audio — chuẩn bị cho luồng tạo video tự động.',
+  },
+  {
+    id: 'gemini',
+    label: 'Gemini TTS',
+    description: 'Gộp toàn bộ kịch bản thành 1 file voiceover liền mạch. Cần Gemini API Key.',
   },
 ];
 
@@ -35,12 +49,12 @@ export const StepSettings: React.FC<StepSettingsProps> = ({ settings, onSave }) 
       <div>
         <h2 className="font-hand text-4xl font-bold text-ink">Cấu hình</h2>
         <p className="font-sans text-gray-600">
-          Chỉ cần dán <strong>Coachio API Key</strong> là chạy được toàn bộ wizard tới bước 5. Gemini key chỉ cần thêm nếu muốn dùng voiceover (TTS).
+          Chỉ cần dán <strong>Coachio API Key</strong> là chạy được toàn bộ wizard (text, ảnh, voiceover). Gemini chỉ cần nếu bạn muốn dùng Gemini TTS hoặc Gemini cho ảnh.
         </p>
       </div>
 
       <div className="bg-white/50 backdrop-blur-sm p-8 rounded-xl border-2 border-ink/10 shadow-sm space-y-6">
-        {/* Coachio API Key — primary, handles text + images */}
+        {/* Coachio API Key — primary, handles text + images + audio */}
         <div className="space-y-2">
           <label className="font-hand text-2xl text-ink block">
             Coachio API Key <span className="font-sans text-xs uppercase tracking-wider text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded">Khuyến nghị</span>
@@ -54,11 +68,11 @@ export const StepSettings: React.FC<StepSettingsProps> = ({ settings, onSave }) 
             className="w-full bg-paper border-2 border-gray-300 focus:border-ink rounded-lg p-3 font-mono text-sm outline-none transition-colors"
           />
           <p className="font-sans text-xs text-gray-500">
-            Dùng cho tạo tiêu đề, kịch bản và ảnh. Lưu cục bộ trong trình duyệt (localStorage).
+            Dùng cho tạo tiêu đề, kịch bản, ảnh và voiceover (ElevenLabs). Lưu cục bộ trong trình duyệt.
           </p>
         </div>
 
-        {/* Gemini API Key — optional, only needed for TTS */}
+        {/* Gemini API Key — optional */}
         <div className="space-y-2 border-t border-ink/10 pt-6">
           <label className="font-hand text-2xl text-ink block">
             Gemini API Key <span className="font-sans text-xs uppercase tracking-wider text-gray-600 bg-gray-100 px-1.5 py-0.5 rounded">Tuỳ chọn</span>
@@ -72,14 +86,15 @@ export const StepSettings: React.FC<StepSettingsProps> = ({ settings, onSave }) 
             className="w-full bg-paper border-2 border-gray-300 focus:border-ink rounded-lg p-3 font-mono text-sm outline-none transition-colors"
           />
           <p className="font-sans text-xs text-gray-500">
-            Chỉ cần nếu bạn muốn tạo voiceover (TTS). Cũng có thể dùng Gemini cho text/ảnh thay cho Coachio nếu bạn thích.
+            Cần nếu bạn chọn Gemini TTS hoặc Gemini cho ảnh. Không có key thì các tùy chọn Gemini sẽ bị vô hiệu.
           </p>
         </div>
 
+        {/* Image provider */}
         <div className="border-t border-ink/10 pt-6 space-y-3">
           <label className="font-hand text-2xl text-ink block">Model tạo ảnh</label>
           <div className="space-y-2">
-            {PROVIDERS.map(p => (
+            {IMAGE_PROVIDERS.map(p => (
               <button
                 key={p.id}
                 onClick={() => setDraft({ ...draft, imageProvider: p.id })}
@@ -97,6 +112,59 @@ export const StepSettings: React.FC<StepSettingsProps> = ({ settings, onSave }) 
               </button>
             ))}
           </div>
+        </div>
+
+        {/* Audio provider */}
+        <div className="border-t border-ink/10 pt-6 space-y-3">
+          <label className="font-hand text-2xl text-ink block">Model tạo voiceover</label>
+          <div className="space-y-2">
+            {AUDIO_PROVIDERS.map(p => (
+              <button
+                key={p.id}
+                onClick={() => setDraft({ ...draft, audioProvider: p.id })}
+                className={`
+                  w-full text-left p-4 rounded-lg border-2 transition-all
+                  ${draft.audioProvider === p.id
+                    ? 'bg-ink text-paper border-ink shadow-md'
+                    : 'bg-white border-gray-200 text-gray-600 hover:border-gray-400'}
+                `}
+              >
+                <div className="font-hand text-xl">{p.label}</div>
+                <div className={`font-sans text-sm mt-0.5 ${draft.audioProvider === p.id ? 'text-paper/80' : 'text-gray-500'}`}>
+                  {p.description}
+                </div>
+              </button>
+            ))}
+          </div>
+
+          {/* Coachio voice picker — only when Coachio TTS is selected */}
+          {draft.audioProvider === 'coachio_elevenlabs' && (
+            <div className="space-y-2 pt-3">
+              <label className="font-hand text-lg text-ink block">Giọng đọc (Coachio TTS)</label>
+              <div className="grid grid-cols-2 gap-2">
+                {COACHIO_VOICES.map(v => (
+                  <button
+                    key={v.id}
+                    onClick={() => setDraft({ ...draft, coachioTtsVoice: v.id })}
+                    className={`
+                      p-3 rounded-lg border-2 text-left transition-all
+                      ${draft.coachioTtsVoice === v.id
+                        ? 'bg-ink text-paper border-ink shadow-md'
+                        : 'bg-white border-gray-200 text-gray-600 hover:border-gray-400'}
+                    `}
+                  >
+                    <div className="font-hand text-lg">{v.label}</div>
+                    <div className={`font-mono text-[10px] mt-0.5 truncate ${draft.coachioTtsVoice === v.id ? 'text-paper/60' : 'text-gray-400'}`}>
+                      {v.id}
+                    </div>
+                  </button>
+                ))}
+              </div>
+              <p className="font-sans text-[11px] text-gray-500">
+                Mỗi cảnh sẽ được TTS riêng → bạn có audio từng đoạn để dựng video / khớp caption sau này.
+              </p>
+            </div>
+          )}
         </div>
 
         <div className="flex items-center gap-3 pt-2">
