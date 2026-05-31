@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Button } from './Button';
 import { Scene, GenerationConfig, AudioProvider } from '../types';
+import { COACHIO_VOICES } from '../services/coachioService';
 
 interface StepAudioProps {
   scenes: Scene[];
@@ -16,15 +17,28 @@ interface StepAudioProps {
   hasGeminiKey: boolean;
   hasCoachioKey: boolean;
   onOpenSettings: () => void;
+  /** Per-project voice settings — live-editable in this step (persisted via App). */
+  coachioTtsVoice: string;
+  geminiTtsStyle: string;
+  onChangeCoachioVoice: (voiceId: string) => void;
+  onChangeGeminiStyle: (style: string) => void;
 }
 
 const DURATIONS: GenerationConfig['duration'][] = ['Short (60s)', 'Medium (3 mins)', 'Long (5-10 mins)'];
 
+/** Predefined Gemini TTS style presets. Click to set the textarea below. */
+const GEMINI_STYLE_PRESETS: { id: string; label: string; instruction: string }[] = [
+  { id: 'normal', label: 'Bình thường', instruction: '' },
+  { id: 'professional', label: 'Chuyên nghiệp', instruction: 'Read the following clearly, like a professional news anchor — confident, neutral, well-paced.' },
+  { id: 'inspirational', label: 'Truyền cảm hứng', instruction: 'Read the following with energy and passion, like a motivational speaker — warm, engaging, varied intonation.' },
+  { id: 'storyteller', label: 'Kể chuyện', instruction: 'Read the following warmly like a storyteller, with natural pauses and an engaging, intimate tone.' },
+];
+
 /**
  * Audio step — gộp toàn bộ kịch bản thành 1 voiceover liền mạch.
  *
- * Tách giọng cho từng scene đã được cố tình bỏ (chi phí x10). Sau khi có
- * audio gộp, dùng Whisper để align caption theo thời gian từng scene.
+ * Picker giọng/phong cách sống ngay tại bước này (không phải mở Cấu hình).
+ * Per-scene timing sẽ được suy ra sau bằng Whisper alignment (xem roadmap video).
  */
 export const StepAudio: React.FC<StepAudioProps> = ({
   scenes,
@@ -39,14 +53,15 @@ export const StepAudio: React.FC<StepAudioProps> = ({
   hasGeminiKey,
   hasCoachioKey,
   onOpenSettings,
+  coachioTtsVoice,
+  geminiTtsStyle,
+  onChangeCoachioVoice,
+  onChangeGeminiStyle,
 }) => {
   const audioRef = useRef<HTMLAudioElement>(null);
   const isCoachio = audioProvider === 'coachio_elevenlabs';
 
-  // Build the joined script from current scene voiceovers.
   const derivedScript = scenes.map(s => s.voiceover).filter(Boolean).join(' ');
-
-  // Allow last-minute manual tweaks before TTS.
   const [editing, setEditing] = useState(false);
   const [editedScript, setEditedScript] = useState(derivedScript);
 
@@ -79,7 +94,7 @@ export const StepAudio: React.FC<StepAudioProps> = ({
         <div>
           <h2 className="font-hand text-3xl font-bold text-ink">Phòng Thu Âm</h2>
           <p className="font-sans text-gray-600 text-sm">
-            {providerLabel} — gộp toàn bộ lời dẫn thành 1 file audio liền mạch (caption khớp scene ghép sau bằng Whisper).
+            {providerLabel} — 1 file audio liền mạch (caption khớp scene ghép sau bằng Whisper).
           </p>
         </div>
         <div className="flex gap-2 flex-wrap justify-end items-center">
@@ -107,9 +122,7 @@ export const StepAudio: React.FC<StepAudioProps> = ({
               {isCoachio ? 'Chưa có Coachio API Key' : 'Chưa có Gemini API Key'}
             </div>
             <div className="font-sans text-xs text-amber-800/80">
-              {isCoachio
-                ? 'Provider đang là Coachio TTS nhưng chưa có key. Vào Cấu hình để dán, hoặc đổi sang Gemini TTS, hoặc bỏ qua audio và xuất ZIP.'
-                : 'Provider đang là Gemini TTS nhưng chưa có key. Vào Cấu hình để dán, hoặc đổi sang Coachio TTS, hoặc bỏ qua audio và xuất ZIP.'}
+              Vào Cấu hình để dán API key, đổi provider, hoặc bỏ qua audio và xuất ZIP.
             </div>
           </div>
           <Button variant="secondary" onClick={onOpenSettings} className="shrink-0">
@@ -117,6 +130,74 @@ export const StepAudio: React.FC<StepAudioProps> = ({
           </Button>
         </div>
       )}
+
+      {/* Voice / Style picker — inline so user can tune the voice without
+          leaving the wizard. Updates persist via App's settings handler. */}
+      <div className="bg-white/50 backdrop-blur-sm p-4 rounded-xl border-2 border-ink/10 space-y-3">
+        {isCoachio ? (
+          <>
+            <div className="flex items-center justify-between gap-3">
+              <label className="font-hand text-lg text-ink">Giọng đọc</label>
+              <span className="font-sans text-[11px] text-gray-500">{providerLabel}</span>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {COACHIO_VOICES.map(v => (
+                <button
+                  key={v.id}
+                  onClick={() => onChangeCoachioVoice(v.id)}
+                  className={`
+                    p-2 rounded-lg border-2 text-left transition-all
+                    ${coachioTtsVoice === v.id
+                      ? 'bg-ink text-paper border-ink shadow-md'
+                      : 'bg-white border-gray-200 text-gray-600 hover:border-gray-400'}
+                  `}
+                >
+                  <div className="font-hand text-base">{v.label}</div>
+                  <div className={`font-mono text-[10px] truncate ${coachioTtsVoice === v.id ? 'text-paper/60' : 'text-gray-400'}`}>
+                    {v.id}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="flex items-center justify-between gap-3">
+              <label className="font-hand text-lg text-ink">Phong cách đọc</label>
+              <span className="font-sans text-[11px] text-gray-500">{providerLabel}</span>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {GEMINI_STYLE_PRESETS.map(preset => {
+                const active = geminiTtsStyle.trim() === preset.instruction.trim();
+                return (
+                  <button
+                    key={preset.id}
+                    onClick={() => onChangeGeminiStyle(preset.instruction)}
+                    className={`
+                      p-2 rounded-lg border-2 text-center transition-all
+                      ${active
+                        ? 'bg-ink text-paper border-ink shadow-md'
+                        : 'bg-white border-gray-200 text-gray-600 hover:border-gray-400'}
+                    `}
+                  >
+                    <div className="font-hand text-sm">{preset.label}</div>
+                  </button>
+                );
+              })}
+            </div>
+            <textarea
+              value={geminiTtsStyle}
+              onChange={e => onChangeGeminiStyle(e.target.value)}
+              placeholder="Hoặc tự nhập hướng dẫn — vd: 'Read calmly with long pauses, like a meditation guide'."
+              rows={2}
+              className="w-full bg-paper border-2 border-gray-300 focus:border-ink rounded-lg p-2 font-sans text-xs outline-none transition-colors resize-vertical"
+            />
+            <p className="font-sans text-[11px] text-gray-500">
+              Hướng dẫn được ghép vào đầu prompt TTS. Bỏ trống = giọng mặc định. Tiếng Anh thường ăn hơn tiếng Việt khi mô tả style.
+            </p>
+          </>
+        )}
+      </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* Left: combined script */}

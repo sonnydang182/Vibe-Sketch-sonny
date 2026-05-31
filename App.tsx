@@ -1115,6 +1115,10 @@ const App: React.FC = () => {
             hasGeminiKey={hasGeminiKey}
             hasCoachioKey={hasCoachioKey}
             onOpenSettings={() => setView('settings')}
+            coachioTtsVoice={settings.coachioTtsVoice || COACHIO_VOICES[0].id}
+            geminiTtsStyle={settings.geminiTtsStyle || ''}
+            onChangeCoachioVoice={(voiceId) => setSettings(s => ({ ...s, coachioTtsVoice: voiceId }))}
+            onChangeGeminiStyle={(style) => setSettings(s => ({ ...s, geminiTtsStyle: style }))}
           />
         );
       default:
