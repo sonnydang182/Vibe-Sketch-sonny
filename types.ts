@@ -35,7 +35,19 @@ export enum AppStep {
   REVIEW_SCRIPT = 2,
   GENERATE_VISUALS = 3,
   GENERATE_THUMBNAIL = 4,
-  GENERATE_AUDIO = 5
+  GENERATE_AUDIO = 5,
+  GENERATE_VIDEO = 6,
+}
+
+/** Per-scene timing inside the combined voiceover audio. */
+export interface SceneTiming {
+  sceneId: string;
+  /** Start time in seconds. */
+  start: number;
+  /** End time in seconds. */
+  end: number;
+  /** How the timing was derived — useful for the UI to flag accuracy. */
+  source: 'estimated' | 'whisper';
 }
 
 export type Language = 'Vietnamese' | 'English' | 'Japanese';

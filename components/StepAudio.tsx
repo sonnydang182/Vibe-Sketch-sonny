@@ -10,6 +10,8 @@ interface StepAudioProps {
   /** Single combined TTS over the whole script — both providers route through here. */
   onGenerateAudio: (overrideScript?: string) => void;
   onExportZip: () => void;
+  /** Continue to step 7 (caption + video). Requires audio to exist. */
+  onNext: () => void;
   onBack: () => void;
   duration: GenerationConfig['duration'];
   onChangeDuration: (d: GenerationConfig['duration']) => void;
@@ -46,6 +48,7 @@ export const StepAudio: React.FC<StepAudioProps> = ({
   isLoading,
   onGenerateAudio,
   onExportZip,
+  onNext,
   onBack,
   duration,
   onChangeDuration,
@@ -109,8 +112,11 @@ export const StepAudio: React.FC<StepAudioProps> = ({
             </select>
           </label>
           <Button variant="secondary" onClick={onBack} disabled={isLoading}>Quay lại</Button>
-          <Button onClick={onExportZip} disabled={!audioUrl && !providerKeyMissing}>
+          <Button variant="secondary" onClick={onExportZip} disabled={!audioUrl && !providerKeyMissing}>
             {exportLabel}
+          </Button>
+          <Button onClick={onNext} disabled={!audioUrl}>
+            Khớp Caption →
           </Button>
         </div>
       </div>

@@ -45,10 +45,12 @@ import { StepScript } from './components/StepScript';
 import { StepVisuals } from './components/StepVisuals';
 import { StepThumbnail } from './components/StepThumbnail';
 import { StepAudio } from './components/StepAudio';
+import { StepVideo } from './components/StepVideo';
 import { StepHistory } from './components/StepHistory';
 import { StepSettings } from './components/StepSettings';
 import { StepSetup } from './components/StepSetup';
 import { BackgroundJobBanner } from './components/BackgroundJobBanner';
+import { hasWhisperProvider } from './services/whisperService';
 
 const SETTINGS_KEY = 'vibesketch.settings.v1';
 const HISTORY_KEY = 'vibesketch.history.v1';
@@ -1108,6 +1110,7 @@ const App: React.FC = () => {
             isLoading={isLoading}
             onGenerateAudio={handleGenerateAudio}
             onExportZip={handleExportZip}
+            onNext={() => setStep(AppStep.GENERATE_VIDEO)}
             onBack={() => setStep(AppStep.GENERATE_THUMBNAIL)}
             duration={config.duration}
             onChangeDuration={(d) => setConfig(prev => ({ ...prev, duration: d }))}
@@ -1119,6 +1122,21 @@ const App: React.FC = () => {
             geminiTtsStyle={settings.geminiTtsStyle || ''}
             onChangeCoachioVoice={(voiceId) => setSettings(s => ({ ...s, coachioTtsVoice: voiceId }))}
             onChangeGeminiStyle={(style) => setSettings(s => ({ ...s, geminiTtsStyle: style }))}
+          />
+        );
+      case AppStep.GENERATE_VIDEO:
+        return (
+          <StepVideo
+            scenes={scenes}
+            audioUrl={audioUrl}
+            language={config.language}
+            hasWhisperProvider={hasWhisperProvider({
+              coachioApiKey: settings.coachioApiKey,
+              geminiApiKey: settings.geminiApiKey,
+            })}
+            onAlignWithWhisper={() => alert("Sẽ wire khi chọn Whisper provider (Coachio / Groq / whisper.cpp WASM).")}
+            onBack={() => setStep(AppStep.GENERATE_AUDIO)}
+            onExportZip={handleExportZip}
           />
         );
       default:
@@ -1227,7 +1245,7 @@ const App: React.FC = () => {
              </div>
 
              {view === 'create' && hasAnyKey && (
-                 <div className="hidden lg:flex gap-4 text-sm font-sans font-semibold text-gray-500 mr-4">
+                 <div className="hidden lg:flex gap-3 text-sm font-sans font-semibold text-gray-500 mr-4">
                     <span className={step === AppStep.INPUT_TOPIC ? "text-ink underline decoration-2 underline-offset-4" : ""}>1. Chủ đề</span>
                     <span className="text-gray-300">→</span>
                     <span className={step === AppStep.SELECT_TITLE ? "text-ink underline decoration-2 underline-offset-4" : ""}>2. Tiêu đề</span>
@@ -1239,6 +1257,8 @@ const App: React.FC = () => {
                     <span className={step === AppStep.GENERATE_THUMBNAIL ? "text-ink underline decoration-2 underline-offset-4" : ""}>5. Bìa</span>
                     <span className="text-gray-300">→</span>
                     <span className={step === AppStep.GENERATE_AUDIO ? "text-ink underline decoration-2 underline-offset-4" : ""}>6. Audio</span>
+                    <span className="text-gray-300">→</span>
+                    <span className={step === AppStep.GENERATE_VIDEO ? "text-ink underline decoration-2 underline-offset-4" : ""}>7. Video</span>
                  </div>
              )}
         </div>
