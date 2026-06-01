@@ -105,17 +105,39 @@ export const assembleVideo = async (params: AssembleParams): Promise<Blob> => {
     if (signal?.aborted) throw new Error("Đã huỷ render.");
   };
 
+  // Build a sceneId → nearest-image map so we never write a black frame for a
+  // scene that lacks its own generated image — fill forward, then backward.
+  const sceneById = new Map(scenes.map(s => [s.id, s]));
+  const imageBySceneId = new Map<string, string>();
+  {
+    let img: string | undefined;
+    for (const t of timings) {
+      const s = sceneById.get(t.sceneId);
+      if (s?.imageUrl) img = s.imageUrl;
+      if (img) imageBySceneId.set(t.sceneId, img);
+    }
+    img = undefined;
+    for (let i = timings.length - 1; i >= 0; i--) {
+      const t = timings[i];
+      const s = sceneById.get(t.sceneId);
+      if (s?.imageUrl) img = s.imageUrl;
+      if (!imageBySceneId.has(t.sceneId) && img) imageBySceneId.set(t.sceneId, img);
+    }
+  }
+
   // Order scenes by their timing start so the image sequence matches audio.
+  // Use the filled image when the scene's own imageUrl is missing.
   const ordered = timings
     .map(t => {
-      const scene = scenes.find(s => s.id === t.sceneId);
-      return scene && scene.imageUrl ? { scene, timing: t } : null;
+      const scene = sceneById.get(t.sceneId);
+      const imageUrl = imageBySceneId.get(t.sceneId);
+      return scene && imageUrl ? { scene, timing: t, imageUrl } : null;
     })
-    .filter(Boolean) as { scene: Scene; timing: SceneTiming }[];
+    .filter(Boolean) as { scene: Scene; timing: SceneTiming; imageUrl: string }[];
 
   if (ordered.length === 0) {
     isBusy = false;
-    throw new Error("Không có scene + ảnh hợp lệ để dựng video.");
+    throw new Error("Không có ảnh nào để dựng video — quay lại bước Hình ảnh.");
   }
 
   try {
@@ -135,9 +157,9 @@ export const assembleVideo = async (params: AssembleParams): Promise<Blob> => {
     // Scene images.
     const concatLines: string[] = [];
     for (let i = 0; i < ordered.length; i++) {
-      const { scene, timing } = ordered[i];
+      const { timing, imageUrl } = ordered[i];
       const fname = `img_${String(i).padStart(3, "0")}.png`;
-      await ffmpeg.writeFile(fname, await urlToUint8(scene.imageUrl!));
+      await ffmpeg.writeFile(fname, await urlToUint8(imageUrl));
       const dur = Math.max(0.1, timing.end - timing.start);
       concatLines.push(`file '${fname}'`);
       concatLines.push(`duration ${dur.toFixed(3)}`);
@@ -145,7 +167,7 @@ export const assembleVideo = async (params: AssembleParams): Promise<Blob> => {
     }
     // The concat demuxer requires the LAST file to be repeated without a
     // `duration` line — otherwise ffmpeg may cut the final image early.
-    concatLines.push(`file '${ordered[ordered.length - 1].scene.imageUrl ? `img_${String(ordered.length - 1).padStart(3, "0")}.png` : ""}'`);
+    concatLines.push(`file 'img_${String(ordered.length - 1).padStart(3, "0")}.png'`);
     await ffmpeg.writeFile("concat.txt", concatLines.join("\n"));
 
     // ASS subtitle — compute chunks first (full scene / word chunks / single

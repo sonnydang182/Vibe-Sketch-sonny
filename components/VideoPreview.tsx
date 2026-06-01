@@ -80,11 +80,44 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
     [scenes, timings, captionStyle, whisperWords],
   );
 
-  const sceneById = new Map<string, Scene>(scenes.map(s => [s.id, s]));
+  const sceneById = useMemo(() => new Map<string, Scene>(scenes.map(s => [s.id, s])), [scenes]);
   const activeTiming = timings.find(t => currentTime >= t.start && currentTime < t.end) ?? null;
   const activeScene: Scene | null = activeTiming
     ? sceneById.get(activeTiming.sceneId) ?? null
     : null;
+
+  /**
+   * Fill the timeline with the nearest available image so black frames don't
+   * appear when individual scenes are missing their generated image. Forward
+   * fill carries the most recent image; backward fill closes the head gap.
+   */
+  const imageBySceneId = useMemo(() => {
+    const m = new Map<string, string>();
+    let img: string | undefined;
+    for (const t of timings) {
+      const s = sceneById.get(t.sceneId);
+      if (s?.imageUrl) img = s.imageUrl;
+      if (img) m.set(t.sceneId, img);
+    }
+    img = undefined;
+    for (let i = timings.length - 1; i >= 0; i--) {
+      const t = timings[i];
+      const s = sceneById.get(t.sceneId);
+      if (s?.imageUrl) img = s.imageUrl;
+      if (!m.has(t.sceneId) && img) m.set(t.sceneId, img);
+    }
+    return m;
+  }, [timings, sceneById]);
+
+  // Stable list of unique image URLs — used for the keep-in-DOM trick so
+  // browsers don't decode a fresh <img> on every scene switch.
+  const uniqueImages = useMemo(() => {
+    const set = new Set<string>();
+    for (const url of imageBySceneId.values()) set.add(url);
+    return Array.from(set);
+  }, [imageBySceneId]);
+
+  const activeImageUrl = activeTiming ? imageBySceneId.get(activeTiming.sceneId) : undefined;
 
   const activeChunk: CaptionChunk | null = useMemo(() => {
     if (!chunks.length) return null;
@@ -113,15 +146,21 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
         className="relative bg-black rounded-lg overflow-hidden mx-auto"
         style={{ aspectRatio: frameAspect, maxHeight, width: aspectRatio === '9:16' ? 270 : '100%' }}
       >
-        {activeScene?.imageUrl ? (
-          <img
-            src={activeScene.imageUrl}
-            alt=""
-            className="absolute inset-0 w-full h-full object-cover"
-          />
+        {/* Render every unique image once and toggle opacity. Prevents the
+            decode flicker that happens when src swaps on rapid scene cuts. */}
+        {uniqueImages.length > 0 ? (
+          uniqueImages.map(url => (
+            <img
+              key={url}
+              src={url}
+              alt=""
+              className="absolute inset-0 w-full h-full object-cover transition-opacity duration-150"
+              style={{ opacity: url === activeImageUrl ? 1 : 0 }}
+            />
+          ))
         ) : (
           <div className="absolute inset-0 flex items-center justify-center font-hand text-paper/40">
-            {scenes.length === 0 ? 'Chưa có scene' : 'Chưa có ảnh cho cảnh hiện tại'}
+            {scenes.length === 0 ? 'Chưa có scene' : 'Chưa có ảnh nào'}
           </div>
         )}
         {activeChunk?.text && (
@@ -197,8 +236,6 @@ const CaptionLine: React.FC<{
 // what you see in the preview is what you get in the final mp4.
 // ---------------------------------------------------------------------------
 
-const SIZE_PX = { small: 18, medium: 28, large: 40 } as const;
-
 const COLOR = {
   white: '#FFFFFF',
   yellow: '#FFD400',
@@ -211,10 +248,18 @@ const HIGHLIGHT_COLOR = {
   green: '#3CCB7F',
 } as const;
 
+/**
+ * Preview is rendered smaller than the final mp4 (e.g. 480px high vs 1280p
+ * render). Scale the user's sizePx down so the visible font size in the
+ * preview roughly matches what they'll see in the exported video.
+ */
+const PREVIEW_HEIGHT_REF = 480;
+
 const captionStyleToCSS = (style: CaptionStyle): React.CSSProperties => {
-  // Match the ASS bump: single-word mode renders bigger for impact.
-  const baseFontSize = SIZE_PX[style.size];
-  const fontSize = style.mode === 'single_word' ? Math.round(baseFontSize * 1.6) : baseFontSize;
+  // Scale relative to the preview reference height; matches the ASS bump
+  // single-word mode applies for impact.
+  const scaled = style.sizePx * (PREVIEW_HEIGHT_REF / 720);
+  const fontSize = style.mode === 'single_word' ? Math.round(scaled * 1.6) : Math.round(scaled);
   const outline = `${Math.max(2, Math.round(fontSize / 12))}px`;
   const textShadow = [
     `${outline} ${outline} 0 #000`,

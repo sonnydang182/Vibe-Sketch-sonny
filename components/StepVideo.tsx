@@ -8,7 +8,6 @@ import {
   CaptionStyle,
   CaptionMode,
   CaptionPosition,
-  CaptionSize,
   CaptionHighlight,
   VideoRenderProgress,
 } from '../types';
@@ -50,6 +49,13 @@ interface StepVideoProps {
   onCancelRender: () => void;
   /** True if SharedArrayBuffer / wasm is unavailable in this browser. */
   videoRenderSupported: boolean;
+
+  /**
+   * Edit the text of a single scene's voiceover — used for manual caption
+   * fixes when Whisper transcribed wrong. Also auto-rewires whisper words
+   * inside the scene's window so karaoke mode reflects the correction.
+   */
+  onEditSceneCaption: (sceneId: string, text: string) => void;
 }
 
 const formatClock = (s: number): string => {
@@ -74,11 +80,8 @@ const POSITIONS: { id: CaptionPosition; label: string }[] = [
   { id: 'top', label: 'Trên' },
 ];
 
-const SIZES: { id: CaptionSize; label: string }[] = [
-  { id: 'small', label: 'Nhỏ' },
-  { id: 'medium', label: 'Vừa' },
-  { id: 'large', label: 'To' },
-];
+/** Quick presets next to the size slider — covers most use cases in one tap. */
+const SIZE_PRESETS = [20, 28, 36, 48, 64, 80];
 
 const HIGHLIGHTS: { id: CaptionHighlight; label: string; swatch: string }[] = [
   { id: 'yellow', label: 'Vàng', swatch: '#FFD400' },
@@ -131,7 +134,20 @@ export const StepVideo: React.FC<StepVideoProps> = ({
   onRender,
   onCancelRender,
   videoRenderSupported,
+  onEditSceneCaption,
 }) => {
+  const [editingSceneId, setEditingSceneId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState('');
+
+  const startEditing = (id: string, text: string) => {
+    setEditingSceneId(id);
+    setEditDraft(text);
+  };
+  const saveEditing = () => {
+    if (editingSceneId !== null) onEditSceneCaption(editingSceneId, editDraft);
+    setEditingSceneId(null);
+  };
+  const cancelEditing = () => setEditingSceneId(null);
   const [audioDuration, setAudioDuration] = useState<number | null>(null);
   const [audioError, setAudioError] = useState<string | null>(null);
 
@@ -339,21 +355,35 @@ export const StepVideo: React.FC<StepVideoProps> = ({
             </div>
           </div>
 
-          {/* Size */}
+          {/* Size — slider + quick presets for granular control */}
           <div className="space-y-1.5">
-            <label className="font-sans text-xs uppercase tracking-wider text-gray-500">Kích cỡ</label>
-            <div className="grid grid-cols-3 gap-1.5">
-              {SIZES.map(s => (
+            <div className="flex items-center justify-between">
+              <label className="font-sans text-xs uppercase tracking-wider text-gray-500">Cỡ chữ</label>
+              <span className="font-mono text-xs text-ink bg-white border border-ink/10 rounded px-1.5">
+                {captionStyle.sizePx}px
+              </span>
+            </div>
+            <input
+              type="range"
+              min={14}
+              max={96}
+              step={2}
+              value={captionStyle.sizePx}
+              onChange={e => onChangeCaptionStyle({ ...captionStyle, sizePx: Number(e.target.value) })}
+              className="w-full accent-ink"
+            />
+            <div className="grid grid-cols-6 gap-1">
+              {SIZE_PRESETS.map(px => (
                 <button
-                  key={s.id}
-                  onClick={() => onChangeCaptionStyle({ ...captionStyle, size: s.id })}
-                  className={`px-2 py-1.5 rounded-md border-2 font-hand text-sm transition-all ${
-                    captionStyle.size === s.id
+                  key={px}
+                  onClick={() => onChangeCaptionStyle({ ...captionStyle, sizePx: px })}
+                  className={`font-mono text-[11px] py-1 rounded border transition-colors ${
+                    captionStyle.sizePx === px
                       ? 'bg-ink text-paper border-ink'
-                      : 'bg-white border-gray-200 text-gray-700 hover:border-gray-400'
+                      : 'bg-white border-gray-200 text-gray-600 hover:border-gray-400'
                   }`}
                 >
-                  {s.label}
+                  {px}
                 </button>
               ))}
             </div>
@@ -443,11 +473,14 @@ export const StepVideo: React.FC<StepVideoProps> = ({
       {/* 4. Per-scene timing table */}
       <section className="bg-white/50 backdrop-blur-sm rounded-xl border-2 border-ink/10 overflow-hidden">
         <div className="px-4 py-2 flex items-center justify-between gap-2 bg-ink/[0.04] border-b border-ink/10">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="font-mono text-[10px] uppercase tracking-wider text-gray-400">Bước 4</span>
-            <span className="font-hand text-lg text-ink">Timing per-scene</span>
+            <span className="font-hand text-lg text-ink">Timing + Sửa Caption</span>
             <span className="font-sans text-[11px] text-gray-500">
               {audioDuration ? `Audio: ${audioDuration.toFixed(2)}s` : '...'}
+            </span>
+            <span className="font-sans text-[11px] text-indigo-700">
+              · click vào lời dẫn để sửa
             </span>
           </div>
           <div className="flex gap-1.5">
@@ -469,14 +502,45 @@ export const StepVideo: React.FC<StepVideoProps> = ({
           {scenes.map((scene, idx) => {
             const t = timings.find(x => x.sceneId === scene.id);
             const dur = t ? t.end - t.start : 0;
+            const isEditing = editingSceneId === scene.id;
             return (
               <div key={scene.id} className="grid grid-cols-12 gap-2 px-4 py-2 items-start font-sans text-xs">
                 <div className="col-span-1 font-mono text-gray-400">{idx + 1}</div>
                 <div className="col-span-2 font-mono text-ink">{t ? formatClock(t.start) : '—'}</div>
                 <div className="col-span-2 font-mono text-ink">{t ? formatClock(t.end) : '—'}</div>
                 <div className="col-span-1 font-mono text-right text-gray-600">{t ? `${dur.toFixed(1)}s` : '—'}</div>
-                <div className="col-span-6 text-ink leading-relaxed line-clamp-2">
-                  {scene.voiceover || <span className="italic text-gray-400">(trống)</span>}
+                <div className="col-span-6">
+                  {isEditing ? (
+                    <div className="space-y-1">
+                      <textarea
+                        value={editDraft}
+                        onChange={e => setEditDraft(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Escape') cancelEditing();
+                          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) saveEditing();
+                        }}
+                        rows={2}
+                        autoFocus
+                        className="w-full p-1.5 bg-paper border-2 border-ink/40 focus:border-ink rounded text-xs font-sans leading-relaxed outline-none resize-vertical"
+                      />
+                      <div className="flex gap-1 justify-end">
+                        <button onClick={cancelEditing} className="font-mono text-[10px] px-2 py-0.5 rounded border border-ink/20 hover:border-ink">
+                          Huỷ (Esc)
+                        </button>
+                        <button onClick={saveEditing} className="font-mono text-[10px] px-2 py-0.5 rounded bg-ink text-paper">
+                          Lưu (⌘↵)
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div
+                      onClick={() => startEditing(scene.id, scene.voiceover)}
+                      title="Click để sửa caption"
+                      className="text-ink leading-relaxed cursor-text hover:bg-ink/[0.04] rounded p-1 -m-1 min-h-[1.5em]"
+                    >
+                      {scene.voiceover || <span className="italic text-gray-400">(trống — click để thêm)</span>}
+                    </div>
+                  )}
                 </div>
               </div>
             );

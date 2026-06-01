@@ -70,10 +70,27 @@ const DEFAULT_CAPTION_STYLE: CaptionStyle = {
   mode: 'word_chunks',
   chunkWords: 4,
   position: 'bottom',
-  size: 'medium',
+  sizePx: 36,
   textColor: 'white',
   highlight: 'yellow',
   background: false,
+};
+
+/**
+ * Migrate legacy caption style (`size: small|medium|large`) into the new
+ * sizePx field. Settings persisted before this commit will have the enum.
+ */
+const migrateCaptionStyle = (raw: unknown): CaptionStyle => {
+  const incoming = (raw && typeof raw === 'object' ? raw : {}) as Partial<CaptionStyle> & { size?: string };
+  let sizePx = incoming.sizePx;
+  if (!sizePx && typeof incoming.size === 'string') {
+    sizePx = incoming.size === 'small' ? 24 : incoming.size === 'large' ? 52 : 36;
+  }
+  return {
+    ...DEFAULT_CAPTION_STYLE,
+    ...incoming,
+    sizePx: sizePx ?? DEFAULT_CAPTION_STYLE.sizePx,
+  };
 };
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -115,7 +132,12 @@ const loadSettings = (): AppSettings => {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return DEFAULT_SETTINGS;
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    const parsed = JSON.parse(raw) as Partial<AppSettings>;
+    return {
+      ...DEFAULT_SETTINGS,
+      ...parsed,
+      captionStyle: migrateCaptionStyle((parsed as any)?.captionStyle),
+    };
   } catch {
     return DEFAULT_SETTINGS;
   }
@@ -1009,6 +1031,54 @@ const App: React.FC = () => {
   };
 
   /**
+   * Manually edit a scene's caption text. Updates scene.voiceover (so future
+   * exports / TTS regenerations stay in sync) and rewires the Whisper word
+   * stream for that scene's window so karaoke mode picks up the correction
+   * instead of replaying the Whisper transcription error.
+   *
+   * Timing strategy:
+   *  - If the new word count matches the old one, swap texts in place and
+   *    keep the existing per-word timestamps (cheap + precise).
+   *  - Otherwise redistribute words evenly across the scene's window — loses
+   *    fine timing but stays in sync with the audio it does cover.
+   */
+  const handleEditSceneCaption = (sceneId: string, newText: string) => {
+    setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, voiceover: newText } : s));
+
+    if (!whisperWords || !whisperTimings) return;
+    const t = whisperTimings.find(x => x.sceneId === sceneId);
+    if (!t) return;
+
+    const trimmed = newText.trim();
+    const newWords = trimmed ? trimmed.split(/\s+/) : [];
+
+    const inScope: WhisperWord[] = [];
+    const outOfScope: WhisperWord[] = [];
+    for (const w of whisperWords) {
+      if (w.start >= t.start - 0.1 && w.end <= t.end + 0.1) inScope.push(w);
+      else outOfScope.push(w);
+    }
+
+    let updated: WhisperWord[];
+    if (newWords.length === 0) {
+      updated = [];
+    } else if (newWords.length === inScope.length) {
+      updated = inScope.map((w, i) => ({ ...w, text: newWords[i] }));
+    } else {
+      const dur = Math.max(0.1, t.end - t.start);
+      const per = dur / newWords.length;
+      updated = newWords.map((text, i) => ({
+        text,
+        start: t.start + i * per,
+        end: i === newWords.length - 1 ? t.end : t.start + (i + 1) * per,
+      }));
+    }
+
+    const merged = [...outOfScope, ...updated].sort((a, b) => a.start - b.start);
+    setWhisperWords(merged);
+  };
+
+  /**
    * Fetch the current combined voiceover blob, send it to the active Whisper
    * provider, and align the returned word timestamps back onto the scene list.
    */
@@ -1305,6 +1375,7 @@ const App: React.FC = () => {
             onRender={handleRenderVideo}
             onCancelRender={handleCancelRender}
             videoRenderSupported={isVideoRenderSupported()}
+            onEditSceneCaption={handleEditSceneCaption}
           />
         );
       default:

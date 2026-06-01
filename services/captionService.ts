@@ -356,11 +356,9 @@ const ASS_COLORS = {
   black:  '&H00000000',
 } as const;
 
-const fontSizeFor = (size: CaptionStyle['size'], height: number): number => {
-  // Sizes calibrated against 1280 / 720 base; scale roughly linearly.
-  const base = size === 'small' ? 36 : size === 'large' ? 72 : 52;
-  return Math.round(base * (height / 720));
-};
+/** Scale the user's base sizePx (referenced to 720p) to the actual render height. */
+const fontSizeFor = (sizePx: number, height: number): number =>
+  Math.round(sizePx * (height / 720));
 
 /**
  * ASS alignment numpad codes:
@@ -385,8 +383,8 @@ export const buildASS = (
   const { w, h } = renderResolution(aspect);
 
   // Single-word mode wants the text to feel BIG. Bump the calibrated size by
-  // 60% so it visually pops without forcing the user to switch to "Large".
-  const baseFontSize = fontSizeFor(style.size, h);
+  // 60% so it visually pops without forcing the user to crank the slider.
+  const baseFontSize = fontSizeFor(style.sizePx, h);
   const fontSize = style.mode === 'single_word' ? Math.round(baseFontSize * 1.6) : baseFontSize;
 
   const primaryColor = ASS_COLORS[style.textColor];

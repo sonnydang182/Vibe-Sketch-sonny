@@ -56,9 +56,6 @@ export type CaptionPosition = 'bottom' | 'middle' | 'top';
 /** Caption highlight (used for the karaoke per-word color when wired). */
 export type CaptionHighlight = 'yellow' | 'red' | 'cyan' | 'green';
 
-/** Caption text size preset. Maps to ASS font sizes per render resolution. */
-export type CaptionSize = 'small' | 'medium' | 'large';
-
 /**
  * How the caption text flows over time inside one scene.
  *
@@ -76,7 +73,11 @@ export interface CaptionStyle {
   /** Number of words per chunk when mode === 'word_chunks'. Range 2–8. */
   chunkWords: number;
   position: CaptionPosition;
-  size: CaptionSize;
+  /**
+   * Base font size in px referenced to 720p render height. Range 14–96.
+   * ASS render and CSS preview both scale relative to this value.
+   */
+  sizePx: number;
   /** Primary text colour — white is the safest CTR pick. */
   textColor: 'white' | 'yellow';
   /** Word / phrase highlight colour. Used by karaoke when word timestamps land. */
