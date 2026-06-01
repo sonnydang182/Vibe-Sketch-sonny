@@ -158,11 +158,21 @@ interface BuildArgsParams {
 /**
  * Generate the ffmpeg cli args for the chosen scene transition.
  *
- *  - cut: concat demuxer over the playlist we wrote (cheapest path).
- *  - fade: one `-loop 1 -t <dur> -i img.png` per scene, scaled to render
- *    resolution, chained through xfade transitions, then subtitles burned in.
- *  - ken_burns: same multi-input setup, each scene gets a zoompan ramp
- *    (1.0 → 1.08 across its own duration), then concat'd and subtitled.
+ * All three transition modes now share the SAME structure: one
+ * `-loop 1 -t <dur> -i img.png` per scene, audio as the last input,
+ * everything stitched together inside one filter_complex graph. The
+ * concat demuxer path was removed because it was producing video that
+ * only showed the first scene image — the slideshow trick (image +
+ * duration) is fragile with image streams in ffmpeg.wasm.
+ *
+ *  - cut: scale each input → concat=n=N:v=1:a=0 → subtitles.
+ *  - fade: scale each input → chained xfade (offset based on running
+ *    OUTPUT duration, not cumulative input — earlier bug) → subtitles.
+ *  - ken_burns: zoompan ramp per input → concat → subtitles.
+ *
+ * Subtitle font: ASS Style uses "Arial" but ffmpeg.wasm has no font
+ * configured by default. We pass `fontsdir=/fonts` so libass picks up
+ * the bundled Inter ttf the assemble step writes into the virtual FS.
  */
 const buildEncodeArgs = ({
   ordered,
@@ -174,29 +184,11 @@ const buildEncodeArgs = ({
 }: BuildArgsParams): string[] => {
   const n = ordered.length;
   const fps = 24;
-  const subtitleClause = "subtitles=captions.ass";
+  // fontsdir lets libass find the Inter ttf we bundle into the wasm FS.
+  // Without it, the subtitles filter renders nothing visible.
+  const subtitleClause = "subtitles=captions.ass:fontsdir=/fonts";
 
-  // Cut path — fast concat demuxer.
-  if (transition === 'cut' || n < 2) {
-    return [
-      "-y",
-      "-f", "concat",
-      "-safe", "0",
-      "-i", "concat.txt",
-      "-i", `audio.${audioExt}`,
-      "-vf", `scale=${w}:${h}:flags=lanczos,${subtitleClause},format=yuv420p`,
-      "-c:v", "libx264",
-      "-preset", "ultrafast",
-      "-tune", "stillimage",
-      "-r", String(fps),
-      "-c:a", "aac",
-      "-b:a", "128k",
-      "-shortest",
-      "out.mp4",
-    ];
-  }
-
-  // Multi-input setup — used by both fade and ken_burns paths.
+  // Multi-input setup — used by every transition.
   const args: string[] = ["-y"];
   for (let i = 0; i < n; i++) {
     const dur = Math.max(0.1, ordered[i].timing.end - ordered[i].timing.start);
@@ -209,45 +201,67 @@ const buildEncodeArgs = ({
   args.push("-i", `audio.${audioExt}`);
   const audioInputIndex = n;
 
+  const scaleClause = `scale=${w}:${h}:flags=lanczos,setsar=1`;
+  const scaleLines = Array.from({ length: n }, (_, i) =>
+    `[${i}:v]${scaleClause}[v${i}]`,
+  );
+
   let filter: string;
 
-  if (transition === 'fade') {
-    // Scale each input to render resolution + format normalisation.
-    const scaleLines = Array.from({ length: n }, (_, i) =>
-      `[${i}:v]scale=${w}:${h}:flags=lanczos,setsar=1,format=yuv420p[v${i}]`
-    );
-    // Chain xfade. offset = cumulative duration so far minus transition time.
+  if (transition === 'fade' && n >= 2) {
+    // Chain xfade between consecutive scenes. Critical fix: offset is
+    // computed off the PREVIOUS OUTPUT'S duration, not against summed
+    // input durations. Each xfade shortens the running total by
+    // transitionDuration, so summing inputs over-estimates the offset
+    // and the transitions collapse beyond scene #2.
     const xfadeLines: string[] = [];
-    let cursor = 0;
     let prevLabel = 'v0';
+    let prevOutputDur = ordered[0].timing.end - ordered[0].timing.start;
     for (let i = 0; i < n - 1; i++) {
-      cursor += ordered[i].timing.end - ordered[i].timing.start;
-      const offset = Math.max(0, cursor - transitionDuration);
+      const offset = Math.max(0, prevOutputDur - transitionDuration);
       const outLabel = `vx${i + 1}`;
       xfadeLines.push(
         `[${prevLabel}][v${i + 1}]xfade=transition=fade:duration=${transitionDuration.toFixed(3)}:offset=${offset.toFixed(3)}[${outLabel}]`,
       );
       prevLabel = outLabel;
+      const nextInputDur = ordered[i + 1].timing.end - ordered[i + 1].timing.start;
+      prevOutputDur = offset + nextInputDur;
     }
     filter = [
       ...scaleLines,
       ...xfadeLines,
       `[${prevLabel}]${subtitleClause}[vout]`,
     ].join(";");
-  } else {
-    // ken_burns: per-scene zoompan ramp from 1.0 → 1.08, then concat.
-    const lines: string[] = [];
+  } else if (transition === 'ken_burns') {
+    // Per-scene zoompan ramp 1.0 → 1.08, then concat them all.
+    const kbLines: string[] = [];
     for (let i = 0; i < n; i++) {
       const dur = Math.max(0.1, ordered[i].timing.end - ordered[i].timing.start);
       const frames = Math.max(2, Math.round(dur * fps));
-      lines.push(
-        `[${i}:v]scale=${w * 2}:${h * 2}:flags=lanczos,zoompan=z='min(1+0.08*on/${frames - 1}\\,1.08)':d=${frames}:fps=${fps}:s=${w}x${h}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)',setsar=1,format=yuv420p[v${i}]`,
+      // Pre-scale to 2x the target to give zoompan room to zoom without
+      // softening; final output res comes from zoompan's s= param.
+      kbLines.push(
+        `[${i}:v]scale=${w * 2}:${h * 2}:flags=lanczos,zoompan=z='min(1+0.08*on/${frames - 1}\\,1.08)':d=${frames}:fps=${fps}:s=${w}x${h}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)',setsar=1[v${i}]`,
       );
     }
     const concatInputs = Array.from({ length: n }, (_, i) => `[v${i}]`).join('');
-    lines.push(`${concatInputs}concat=n=${n}:v=1:a=0[vcat]`);
-    lines.push(`[vcat]${subtitleClause}[vout]`);
-    filter = lines.join(";");
+    filter = [
+      ...kbLines,
+      `${concatInputs}concat=n=${n}:v=1:a=0[vcat]`,
+      `[vcat]${subtitleClause}[vout]`,
+    ].join(";");
+  } else {
+    // cut (or single-scene fade fallback) — straight concat filter.
+    const concatInputs = Array.from({ length: n }, (_, i) => `[v${i}]`).join('');
+    if (n === 1) {
+      filter = `${scaleLines[0]};[v0]${subtitleClause}[vout]`;
+    } else {
+      filter = [
+        ...scaleLines,
+        `${concatInputs}concat=n=${n}:v=1:a=0[vcat]`,
+        `[vcat]${subtitleClause}[vout]`,
+      ].join(";");
+    }
   }
 
   args.push(
@@ -256,7 +270,7 @@ const buildEncodeArgs = ({
     "-map", `${audioInputIndex}:a`,
     "-c:v", "libx264",
     "-preset", "ultrafast",
-    "-tune", "stillimage",
+    "-pix_fmt", "yuv420p",
     "-r", String(fps),
     "-c:a", "aac",
     "-b:a", "128k",
@@ -374,18 +388,20 @@ export const assembleVideo = async (params: AssembleParams): Promise<Blob> => {
       check();
     }
 
-    // Concat demuxer playlist — used only when transition === 'cut'.
-    if (transition === 'cut') {
-      const concatLines: string[] = [];
-      for (let i = 0; i < ordered.length; i++) {
-        const dur = Math.max(0.1, ordered[i].timing.end - ordered[i].timing.start);
-        concatLines.push(`file 'img_${String(i).padStart(3, "0")}.png'`);
-        concatLines.push(`duration ${dur.toFixed(3)}`);
-      }
-      // ffmpeg's concat demuxer needs the last file repeated without duration.
-      concatLines.push(`file 'img_${String(ordered.length - 1).padStart(3, "0")}.png'`);
-      await ffmpeg.writeFile("concat.txt", concatLines.join("\n"));
+    // Font — without this libass renders nothing for the subtitles filter.
+    // Inter Bold's internal name is "Inter", which matches our ASS Style.
+    try {
+      await ffmpeg.createDir("/fonts");
+    } catch { /* already exists */ }
+    const fontRes = await fetch("/fonts/Inter-Bold.ttf");
+    if (!fontRes.ok) {
+      throw new Error(`Font fetch ${fontRes.status} — captions can't render without /fonts/Inter-Bold.ttf`);
     }
+    await ffmpeg.writeFile(
+      "/fonts/Inter-Bold.ttf",
+      new Uint8Array(await fontRes.arrayBuffer()),
+    );
+    check();
 
     // ASS subtitle — compute chunks first (full scene / word chunks / single
     // word / karaoke), then emit one Dialogue line per chunk.
@@ -404,20 +420,36 @@ export const assembleVideo = async (params: AssembleParams): Promise<Blob> => {
       const r = Math.max(0, Math.min(1, progress));
       emit({ phase: "encode", ratio: 0.4 + r * 0.55, message: `Encoding ${Math.round(r * 100)}%` });
     };
+
+    // Capture the last 80 ffmpeg log lines so encode failures surface the
+    // actual stderr instead of a vague "exec failed".
+    const encodeLog: string[] = [];
+    const onLog = ({ message }: { message: string }) => {
+      console.log("[ffmpeg]", message);
+      encodeLog.push(message);
+      if (encodeLog.length > 80) encodeLog.shift();
+    };
     ffmpeg.on("progress", onFfmpegProgress);
+    ffmpeg.on("log", onLog);
+
+    const args = buildEncodeArgs({
+      ordered,
+      audioExt,
+      w,
+      h,
+      transition,
+      transitionDuration,
+    });
+    console.log("[ffmpeg] exec args:", args.join(" "));
 
     try {
-      const args = buildEncodeArgs({
-        ordered,
-        audioExt,
-        w,
-        h,
-        transition,
-        transitionDuration,
-      });
       await ffmpeg.exec(args);
+    } catch (e: any) {
+      const tail = encodeLog.slice(-25).join("\n");
+      throw new Error(`Render failed: ${e?.message || e}\n\nLast ffmpeg output:\n${tail}`);
     } finally {
       ffmpeg.off("progress", onFfmpegProgress);
+      ffmpeg.off("log", onLog);
     }
     check();
 
