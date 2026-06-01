@@ -31,3 +31,4 @@ dist-ssr
 
 # Auto-copied from node_modules by scripts/copy-ffmpeg-core.mjs
 /public/ffmpeg-core/
+/public/ffmpeg-wrapper/

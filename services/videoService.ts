@@ -1,5 +1,13 @@
 import { FFmpeg } from "@ffmpeg/ffmpeg";
 import { fetchFile } from "@ffmpeg/util";
+
+// The wrapper's worker.js is self-hosted under /public/ffmpeg-wrapper/ so
+// Vite leaves it untouched. Vite's auto-transform of the worker rewrites
+// the worker's `import(coreURL)` to `import(coreURL + '?import')`, which
+// causes the request to be served as `index.html` (SPA fallback) — i.e.
+// the worker dies with "Failed to fetch dynamically imported module".
+// Serving the raw worker bypasses that path entirely.
+const CLASS_WORKER_URL = "/ffmpeg-wrapper/worker.js";
 import {
   Scene,
   SceneTiming,
@@ -27,48 +35,6 @@ import {
 let ffmpegInstance: FFmpeg | null = null;
 let ffmpegLoadPromise: Promise<FFmpeg> | null = null;
 let isBusy = false;
-
-/**
- * Stream a URL into a same-origin blob URL while reporting bytes-loaded.
- *
- * We don't use `@ffmpeg/util#toBlobURL` here because it does a single `fetch
- * + arrayBuffer()` which can't surface progress. Without progress the UI
- * shows "10%" for the entire 32MB wasm download and feels frozen, even
- * though the network is fine.
- */
-const fetchWithProgress = async (
-  url: string,
-  mime: string,
-  onProgress?: (loaded: number, total: number | undefined) => void,
-): Promise<string> => {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Fetch ${url} → ${res.status}`);
-
-  const contentLength = res.headers.get("content-length");
-  const total = contentLength ? Number(contentLength) : undefined;
-
-  if (!res.body) {
-    // Older browsers / proxies without streaming bodies — just take the
-    // whole blob in one shot. Progress callback fires once at end.
-    const blob = await res.blob();
-    onProgress?.(blob.size, blob.size);
-    return URL.createObjectURL(new Blob([blob], { type: mime }));
-  }
-
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let loaded = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      chunks.push(value);
-      loaded += value.byteLength;
-      onProgress?.(loaded, total);
-    }
-  }
-  return URL.createObjectURL(new Blob(chunks, { type: mime }));
-};
 
 /** Wrap a promise with a deadline so a hung worker init doesn't UI-freeze. */
 const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
@@ -103,34 +69,61 @@ const getFFmpeg = async (
 
   ffmpegLoadPromise = (async () => {
     try {
-      onProgress?.(0.02, "Tải ffmpeg-core.js…");
-      const coreURL = await fetchWithProgress(
-        "/ffmpeg-core/ffmpeg-core.js",
-        "text/javascript",
-      );
-
-      onProgress?.(0.05, "Tải ffmpeg-core.wasm (~32MB)…");
-      const wasmURL = await fetchWithProgress(
-        "/ffmpeg-core/ffmpeg-core.wasm",
-        "application/wasm",
-        (loaded, total) => {
-          const mb = (loaded / 1024 / 1024).toFixed(1);
-          if (total) {
-            const r = loaded / total;
-            onProgress?.(0.05 + r * 0.8, `Tải wasm: ${mb}MB / ${(total / 1024 / 1024).toFixed(0)}MB`);
-          } else {
-            onProgress?.(0.5, `Tải wasm: ${mb}MB…`);
+      // Warm the browser's HTTP cache for the 32MB wasm so the user gets
+      // visible progress. We then pass DIRECT same-origin URLs to
+      // ffmpeg.load() — module workers can't reliably `import()` blob URLs
+      // built in the parent context, so we avoid that path entirely.
+      onProgress?.(0.02, "Tải ffmpeg-core.wasm (~31MB)…");
+      const wasmRes = await fetch("/ffmpeg-core/ffmpeg-core.wasm");
+      if (!wasmRes.ok) throw new Error(`wasm fetch ${wasmRes.status}`);
+      const total = Number(wasmRes.headers.get("content-length")) || undefined;
+      if (wasmRes.body) {
+        const reader = wasmRes.body.getReader();
+        let loaded = 0;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            loaded += value.byteLength;
+            const mb = (loaded / 1024 / 1024).toFixed(1);
+            if (total) {
+              const r = loaded / total;
+              onProgress?.(
+                0.02 + r * 0.83,
+                `Tải wasm: ${mb}MB / ${(total / 1024 / 1024).toFixed(0)}MB`,
+              );
+            } else {
+              onProgress?.(0.5, `Tải wasm: ${mb}MB…`);
+            }
           }
-        },
-      );
+        }
+      } else {
+        // Older runtimes without streaming bodies.
+        await wasmRes.arrayBuffer();
+      }
+      // After this, the wasm sits in the disk cache. The worker's own
+      // fetch (a few seconds later) will reuse the cached bytes instantly.
 
-      onProgress?.(0.9, "Khởi tạo ffmpeg worker…");
+      onProgress?.(0.88, "Khởi tạo ffmpeg worker…");
       const inst = new FFmpeg();
       inst.on("log", ({ message }) => {
         // Surface ffmpeg log lines so codec / demuxer failures aren't silent.
         console.debug("[ffmpeg]", message);
       });
-      await withTimeout(inst.load({ coreURL, wasmURL }), 60_000, "ffmpeg.load()");
+
+      // Direct URLs all served same-origin from /public/. Module worker
+      // does `import('/ffmpeg-core/ffmpeg-core.js')` and gets the raw ESM
+      // core — no Vite transform interference.
+      await withTimeout(
+        inst.load({
+          coreURL: "/ffmpeg-core/ffmpeg-core.js",
+          wasmURL: "/ffmpeg-core/ffmpeg-core.wasm",
+          classWorkerURL: CLASS_WORKER_URL,
+        }),
+        60_000,
+        "ffmpeg.load()",
+      );
+
       onProgress?.(1, "ffmpeg ready");
       ffmpegInstance = inst;
       return inst;
@@ -440,3 +433,22 @@ export const assembleVideo = async (params: AssembleParams): Promise<Blob> => {
 /** Cheap check the UI can run at mount-time to decide if rendering is even possible. */
 export const isVideoRenderSupported = (): boolean =>
   typeof SharedArrayBuffer !== "undefined" && typeof WebAssembly !== "undefined";
+
+/**
+ * Smoke-test helper: warms the ffmpeg instance and resolves the elapsed time.
+ * Useful for diagnosing load failures from the dev console without running a
+ * full render.  Exposed on `window.__ffmpegLoadTest` in dev.
+ */
+export const ffmpegLoadTest = async (): Promise<{ ok: true; elapsed: number } | { ok: false; error: string }> => {
+  const t0 = performance.now();
+  try {
+    await getFFmpeg((r, msg) => console.log(`[ffmpeg-load] ${(r * 100).toFixed(0)}% ${msg}`));
+    return { ok: true, elapsed: (performance.now() - t0) / 1000 };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+};
+
+if (typeof window !== "undefined") {
+  (window as any).__ffmpegLoadTest = ffmpegLoadTest;
+}
