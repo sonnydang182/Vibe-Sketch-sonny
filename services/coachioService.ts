@@ -1,7 +1,21 @@
 const COACHIO_BASE = "https://api.coachio.ai/api/v1";
 
-/** Default LLM model used for all chat completions. */
+/**
+ * Default LLM model — fast/cheap "lite" tier. Fine for short tasks
+ * (5 titles, a 200-word outline, single-paragraph rewrites).
+ *
+ * DO NOT use this for long structured-JSON outputs (e.g. multi-scene
+ * scripts) — the lite tier truncates / mis-formats them. Use
+ * COACHIO_SMART_MODEL for those.
+ */
 export const COACHIO_DEFAULT_MODEL = "google/gemini-3.1-flash-lite";
+
+/**
+ * Smarter / larger model for long structured outputs (script JSON with
+ * 14-28 scene objects, etc.). Slower + pricier but reliable JSON.
+ * If Coachio changes its model catalog, this is the single string to swap.
+ */
+export const COACHIO_SMART_MODEL = "google/gemini-3.1-pro";
 
 type CoachioAspectRatio =
   | "auto" | "1:1" | "5:4" | "9:16" | "21:9" | "16:9"
@@ -9,12 +23,23 @@ type CoachioAspectRatio =
 
 type CoachioResolution = "1k" | "2k" | "4k";
 
+/**
+ * Image model on Coachio's task endpoint. Catalog as of 2026-05:
+ *  - gpt_image_2     — OpenAI gpt-image-2 (sharp text, photographic flexibility)
+ *  - nano-banana-2   — Google Nano Banana 2 (cheaper / faster, decent doodles)
+ */
+export type CoachioImageModel = "gpt_image_2" | "nano-banana-2";
+
 interface SubmitTaskOptions {
   apiKey: string;
   prompt: string;
   aspectRatio: CoachioAspectRatio;
   resolution?: CoachioResolution;
   imagesUrl?: string[]; // Optional reference images (already uploaded)
+  /** Image model. Defaults to gpt_image_2 for backward compat. */
+  modelIdentifier?: CoachioImageModel;
+  /** generation_mode — gpt_image_2 uses "default"; nano-banana-2 also accepts "default". */
+  generationMode?: string;
 }
 
 interface SubmitTaskResponse {
@@ -76,8 +101,8 @@ export const submitImageTask = async (
     task_type: "image",
     prompt: opts.prompt,
     ai_model_config: {
-      model_identifier: "gpt_image_2",
-      generation_mode: "default",
+      model_identifier: opts.modelIdentifier || "gpt_image_2",
+      generation_mode: opts.generationMode || "default",
       aspect_ratio,
       resolution,
     },
@@ -241,10 +266,23 @@ const extractJSON = <T,>(raw: string): T => {
     if (firstBrace >= 0) {
       const lastBrace = Math.max(candidate.lastIndexOf("}"), candidate.lastIndexOf("]"));
       if (lastBrace > firstBrace) {
-        return JSON.parse(candidate.slice(firstBrace, lastBrace + 1)) as T;
+        try {
+          return JSON.parse(candidate.slice(firstBrace, lastBrace + 1)) as T;
+        } catch {
+          /* fall through to the diagnostic throw below */
+        }
       }
     }
-    throw new Error(`Coachio chat: response is not valid JSON: ${raw.slice(0, 200)}`);
+    // Diagnostics: most common failure on cheap/short-budget models is a
+    // truncated JSON tail (no closing `]`/`}`). Detect that explicitly so
+    // the error message points the user to the right fix (bigger model /
+    // bigger maxTokens) instead of a generic parse error.
+    const last = trimmed.slice(-1);
+    const looksTruncated = !/[\]}]$/.test(trimmed);
+    const hint = looksTruncated
+      ? `Có vẻ output bị cắt giữa chừng (kết thúc bằng "${last}"). Đổi sang model lớn hơn hoặc tăng maxTokens.`
+      : 'Model trả về văn bản không phải JSON. Đổi model hoặc nhắc rõ "Return ONLY JSON" trong prompt.';
+    throw new Error(`Coachio chat: JSON parse failed. ${hint} Preview: ${raw.slice(0, 200)}`);
   }
 };
 
@@ -272,14 +310,19 @@ export const generateImageWithCoachio = async (params: {
   prompt: string;
   aspectRatio: "16:9" | "9:16";
   imagesUrl?: string[];
+  /** Coachio image model. Defaults to gpt_image_2. */
+  modelIdentifier?: CoachioImageModel;
 }): Promise<string> => {
   if (!params.apiKey) throw new Error("Coachio API key is missing");
+  // nano-banana-2 currently rejects 16:9 / 9:16 with non-1k resolution at
+  // submit time, so we keep resolution at 1k and just pass through aspect.
   const taskId = await submitImageTask({
     apiKey: params.apiKey,
     prompt: params.prompt,
     aspectRatio: mapAspectRatio(params.aspectRatio),
     resolution: "1k",
     imagesUrl: params.imagesUrl,
+    modelIdentifier: params.modelIdentifier || "gpt_image_2",
   });
   const urls = await pollTaskStatus(params.apiKey, taskId);
   return await fetchAsDataUrl(urls[0]);

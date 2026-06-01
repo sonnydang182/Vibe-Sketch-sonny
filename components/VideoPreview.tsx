@@ -251,14 +251,16 @@ const PreviewImage: React.FC<{
   sceneEnd: number;
   currentTime: number;
 }> = ({ url, isActive, transition, transitionDuration, sceneStart, sceneEnd, currentTime }) => {
-  // Linear scale from 1.0 at scene start to 1.08 at scene end — only used
-  // when transition === 'ken_burns'. Clamped so it doesn't keep zooming
-  // past the scene window.
+  // Slow zoom 1.0 → 1.04 over the scene window. Lower delta + no CSS
+  // transition on `transform` keeps the motion smooth: RAF drives the
+  // current scale every ~16ms and the browser composites it directly.
+  // The previous version added `transition: transform 80ms linear` which
+  // fought the RAF updates and produced the visible "rung" jitter.
   const kenBurnsScale = useMemo(() => {
     if (transition !== 'ken_burns') return 1;
     const dur = Math.max(0.1, sceneEnd - sceneStart);
     const t = Math.max(0, Math.min(1, (currentTime - sceneStart) / dur));
-    return 1 + t * 0.08;
+    return 1 + t * 0.04;
   }, [transition, sceneStart, sceneEnd, currentTime]);
 
   const fadeMs = transition === 'cut' ? 0 : Math.round(transitionDuration * 1000);
@@ -270,9 +272,13 @@ const PreviewImage: React.FC<{
       className="absolute inset-0 w-full h-full object-cover"
       style={{
         opacity: isActive ? 1 : 0,
-        transition: `opacity ${fadeMs}ms ease-in-out, transform 80ms linear`,
-        transform: isActive && transition === 'ken_burns' ? `scale(${kenBurnsScale.toFixed(4)})` : 'scale(1)',
+        // Only opacity is CSS-transitioned — transform is driven directly
+        // by RAF state updates for a smooth Ken Burns ramp.
+        transition: `opacity ${fadeMs}ms ease-in-out`,
+        transform: isActive && transition === 'ken_burns' ? `scale(${kenBurnsScale.toFixed(5)})` : 'scale(1)',
         transformOrigin: 'center center',
+        willChange: transition === 'ken_burns' ? 'transform' : undefined,
+        backfaceVisibility: 'hidden',
       }}
     />
   );

@@ -102,6 +102,13 @@ export const alignSceneTimingsToWhisper = (
   scenes: Scene[],
   whisperWords: WhisperWord[],
   language: Language,
+  /**
+   * Total audio duration in seconds — used to extend the last scene's end
+   * to the actual audio end. Whisper's last word frequently ends BEFORE
+   * the audio (trailing silence, breath, fade-out), and without this pad
+   * the render is shorter than the audio (final 5-10s of audio gets cut).
+   */
+  audioDurationSec?: number,
 ): SceneTiming[] => {
   if (scenes.length === 0 || whisperWords.length === 0) return [];
 
@@ -113,7 +120,7 @@ export const alignSceneTimingsToWhisper = (
   const scale = totalExpected > 0 ? totalActual / totalExpected : 1;
 
   let wordCursor = 0;
-  return scenes.map((scene, i) => {
+  const out: SceneTiming[] = scenes.map((scene, i) => {
     const take = Math.max(1, Math.round(expectedCounts[i] * scale));
     const startIdx = Math.min(wordCursor, whisperWords.length - 1);
     const endIdx = Math.min(wordCursor + take - 1, whisperWords.length - 1);
@@ -134,6 +141,18 @@ export const alignSceneTimingsToWhisper = (
       source: 'whisper' as const,
     };
   });
+
+  // Extend last scene to actual audio duration so the rendered video covers
+  // the whole audio track (Whisper drops trailing silence). Only stretch,
+  // never shrink — if audio is shorter than the last word's end-time, leave
+  // the word-based end alone.
+  if (audioDurationSec && out.length > 0) {
+    const last = out[out.length - 1];
+    if (audioDurationSec > last.end) {
+      out[out.length - 1] = { ...last, end: audioDurationSec };
+    }
+  }
+  return out;
 };
 
 // ---------------------------------------------------------------------------

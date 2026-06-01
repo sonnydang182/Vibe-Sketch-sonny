@@ -97,7 +97,7 @@ export interface VideoRenderProgress {
 
 export type Language = 'Vietnamese' | 'English' | 'Japanese';
 
-export type ImageProvider = 'gemini' | 'coachio_gpt_image_2';
+export type ImageProvider = 'gemini' | 'coachio_gpt_image_2' | 'coachio_nano_banana_2';
 export type AudioProvider = 'gemini' | 'coachio_elevenlabs';
 
 export type CharacterId =
@@ -110,6 +110,14 @@ export type CharacterId =
 
 export interface GenerationConfig {
   topic: string;
+  /**
+   * Optional free-form context the user pastes in (research notes, the angle
+   * they want, source material, a personal anecdote, etc.). When present, it
+   * is appended to BOTH the title generation prompt and the script generation
+   * prompt so the output reflects the user's intent instead of generic takes.
+   * Empty string = no context.
+   */
+  context: string;
   tone: 'Stoic' | 'Motivational' | 'Dark Philosophy' | 'Humorous';
   duration: 'Short (60s)' | 'Medium (3 mins)' | 'Long (5-10 mins)';
   aspectRatio: '16:9' | '9:16';
@@ -148,6 +156,12 @@ export interface AppSettings {
    * Set via preset buttons or typed directly.
    */
   geminiTtsStyle: string;
+  /**
+   * Speaker gender for Gemini TTS. Picks a male or female prebuilt voice
+   * per language at TTS time (see GEMINI_VOICE_BY_LANG_GENDER in
+   * geminiService). Defaults to 'female'.
+   */
+  geminiTtsGender: 'female' | 'male';
   /** Caption render style — persisted so the picker remembers the last choice. */
   captionStyle: CaptionStyle;
   /** Scene transition mode for both preview and final mp4. */

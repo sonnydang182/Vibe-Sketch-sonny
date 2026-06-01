@@ -5,6 +5,7 @@ import {
   uploadImage as coachioUpload,
   coachioChat,
   coachioChatJSON,
+  COACHIO_SMART_MODEL,
 } from "./coachioService";
 
 let userGeminiApiKey: string | null = null;
@@ -108,13 +109,22 @@ const LANGUAGE_CONFIG: Record<Language, {
 /**
  * Generate Viral Titles. Uses Coachio when its key is set, otherwise Gemini.
  */
-export const generateViralTitles = async (topic: string, tone: string, language: Language): Promise<string[]> => {
+export const generateViralTitles = async (
+  topic: string,
+  tone: string,
+  language: Language,
+  context?: string,
+): Promise<string[]> => {
   const config = LANGUAGE_CONFIG[language];
+
+  const contextBlock = (context && context.trim())
+    ? `\n\n    EXTRA CONTEXT FROM THE CREATOR (treat as authoritative — titles must align with this angle, not generic takes on "${topic}"):\n    """\n    ${context.trim()}\n    """`
+    : '';
 
   const prompt = `
     Act as a ${config.role}.
     Generate 5 viral YouTube titles in ${language} based on the keyword: "${topic}".
-    Tone: ${tone}.
+    Tone: ${tone}.${contextBlock}
 
     Title formulas to draw from (pick whichever fits naturally — mix them, don't repeat the same one):
     ${config.formulas}
@@ -152,6 +162,88 @@ export const generateViralTitles = async (topic: string, tone: string, language:
   } catch (error) {
     console.error("Error generating titles:", error);
     return ["Error generating titles. Please try again."];
+  }
+};
+
+/**
+ * Generate a neutral, factual outline / talking points for a given topic so
+ * the user can pre-fill the Context field on step 0. The AI is explicitly
+ * told NOT to fabricate facts (numbers, dates, names, quotes) and to mark
+ * placeholders where the user should plug in their own data.
+ *
+ * Output is plain markdown (bullet list), localised per language. Returns
+ * the raw text — the caller just dumps it into the context textarea.
+ */
+export const suggestContextOutline = async (
+  topic: string,
+  tone: string,
+  language: Language,
+): Promise<string> => {
+  // Localised placeholder + closing instructions so the AI knows which
+  // language to write in AND which placeholder marker to use for unknown
+  // facts (so the user can spot what to fill in later).
+  const i18n: Record<Language, { placeholder: string; outputLang: string; closing: string }> = {
+    Vietnamese: {
+      placeholder: '[cần nguồn]',
+      outputLang: 'Vietnamese',
+      closing: 'Viết dàn ý bằng tiếng Việt, dùng markdown bullet, dài tối đa ~250 từ. Không thêm lời chào hay đoạn mở đầu, chỉ trả về dàn ý.',
+    },
+    English: {
+      placeholder: '[needs source]',
+      outputLang: 'English',
+      closing: 'Write the outline in English, use markdown bullets, max ~250 words. No greeting or intro line — outline only.',
+    },
+    Japanese: {
+      placeholder: '[要出典]',
+      outputLang: 'Japanese',
+      closing: '日本語で、markdownの箇条書き、最大250語程度。挨拶や導入は不要、アウトラインのみ返してください。',
+    },
+  };
+  const t = i18n[language];
+
+  const prompt = `
+You are a neutral research assistant helping a YouTube creator outline a video on this topic:
+"${topic}"
+
+The intended tone is "${tone}", but your job here is NOT to write a script — it is to give the creator a balanced, factual research outline they can edit.
+
+HARD RULES — these matter more than style:
+1. ACCURACY OVER FLOW: never invent statistics, dates, study names, quotes, or attributions. If a specific number/study/quote would naturally fit, write the placeholder ${t.placeholder} so the creator knows to plug their own source in.
+2. NO BIAS: if the topic is contested or has multiple valid perspectives, present at least two sides briefly. Don't moralise, don't pick a side for the creator.
+3. NO CLICKBAIT FRAMING: this is a planning document, not a hook. Use neutral, descriptive language.
+4. STAY ON TOPIC: don't drift into tangents. Every bullet must directly serve the stated topic.
+5. STRUCTURE (in this order):
+   - **Góc nhìn / Angle:** 1–2 sentences on the most useful angle to take.
+   - **Các ý chính / Key points:** 3–5 bullets. Each is a structural idea, not a claim. Sub-bullet only if it clarifies what the creator needs to research.
+   - **Kết / Takeaway:** 1 sentence on what the viewer should walk away with.
+   - **Cần kiểm chứng / To verify:** short list of specific facts the creator should look up before publishing (uses the ${t.placeholder} marker).
+
+${t.closing}
+`;
+
+  const coachioKey = getActiveCoachioKey();
+  if (coachioKey) {
+    try {
+      return await coachioChat(coachioKey, prompt, { temperature: 0.4, maxTokens: 1200 });
+    } catch (error) {
+      console.error('Error generating context outline (Coachio):', error);
+      throw error;
+    }
+  }
+
+  const ai = getAI();
+  try {
+    return await withRetry(async () => {
+      const response = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: prompt,
+        config: { temperature: 0.4 },
+      });
+      return response.text || '';
+    });
+  } catch (error) {
+    console.error('Error generating context outline:', error);
+    throw error;
   }
 };
 
@@ -216,7 +308,12 @@ export const buildDurationProfile = (
 /**
  * Generate Script, Visual Descriptions and Keywords
  */
-export const generateScriptScenes = async (title: string, duration: string, language: Language): Promise<Scene[]> => {
+export const generateScriptScenes = async (
+  title: string,
+  duration: string,
+  language: Language,
+  context?: string,
+): Promise<Scene[]> => {
   const config = LANGUAGE_CONFIG[language];
   const profile = buildDurationProfile(duration, language);
 
@@ -226,10 +323,14 @@ export const generateScriptScenes = async (title: string, duration: string, lang
     cinematic: 'cinematic and reflective — longer beats, more storytelling per scene',
   };
 
+  const contextBlock = (context && context.trim())
+    ? `\n\n    EXTRA CONTEXT FROM THE CREATOR (treat as the authoritative angle / source material — every scene must build on this rather than generic takes on the topic):\n    """\n    ${context.trim()}\n    """`
+    : '';
+
   const prompt = `
     Act as a master storyteller for ${language} explainer videos (stick-figure / doodle style).
     Create a script for a video titled: "${title}".
-    Target total duration: ${duration} (~${profile.totalSeconds}s).
+    Target total duration: ${duration} (~${profile.totalSeconds}s).${contextBlock}
 
     TONE & LANGUAGE RULES (CRITICAL):
     1. **Universal Appeal:** Simple, punchy, and understandable.
@@ -273,17 +374,43 @@ export const generateScriptScenes = async (title: string, duration: string, lang
 
   const coachioKey = getActiveCoachioKey();
   if (coachioKey) {
-    try {
-      const data = await coachioChatJSON<SceneJSON[]>(coachioKey, prompt, {
-        temperature: 0.8,
-        // Script JSON is larger than the default — give it more headroom.
-        maxTokens: 4096,
-      });
-      return toScenes(data);
-    } catch (error) {
-      console.error("Error generating script (Coachio):", error);
-      return [];
+    // Script JSON is the largest structured output in the app. Try the
+    // smart (pro) tier first; if Coachio's catalog doesn't include it (404
+    // / "unknown model"), fall back through full-flash and finally lite.
+    // This way the user always gets a working result, and we still default
+    // to the most reliable model when available.
+    const candidates = [
+      COACHIO_SMART_MODEL,        // google/gemini-3.1-pro — best at strict JSON
+      "google/gemini-3.1-flash",  // mid tier fallback
+      "google/gemini-3.1-flash-lite", // worst case — same as the default
+    ];
+    const errors: string[] = [];
+    for (const model of candidates) {
+      try {
+        console.log(`[script] Coachio model: ${model}`);
+        const data = await coachioChatJSON<SceneJSON[]>(coachioKey, prompt, {
+          model,
+          temperature: 0.8,
+          maxTokens: 8192,
+        });
+        if (!Array.isArray(data) || data.length === 0) {
+          throw new Error(`returned ${Array.isArray(data) ? 'empty array' : 'non-array value'}`);
+        }
+        return toScenes(data);
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        console.warn(`[script] ${model} failed: ${msg}`);
+        errors.push(`${model}: ${msg}`);
+        // Only continue the cascade for model-availability errors. If it's
+        // a key/auth issue, fail fast — every subsequent model will fail
+        // the same way and we just waste roundtrips.
+        const lower = msg.toLowerCase();
+        const isModelMissing = /\b(404|400|model|not found|unknown|unsupported|invalid)\b/.test(lower);
+        const isAuth = /\b(401|403|unauthor|forbidden|api[- ]?key)\b/.test(lower);
+        if (isAuth || !isModelMissing) break;
+      }
     }
+    throw new Error(`[Coachio script] Tất cả model thất bại:\n${errors.join('\n')}`);
   }
 
   const ai = getAI();
@@ -414,8 +541,8 @@ export const generateDoodleImage = async (
     - Format: ${aspectRatio === '9:16' ? 'Vertical Portrait (9:16)' : 'Horizontal Landscape (16:9)'}.
   `;
 
-  // Coachio path
-  if (opts.provider === 'coachio_gpt_image_2') {
+  // Coachio path (either gpt_image_2 or nano-banana-2)
+  if (opts.provider === 'coachio_gpt_image_2' || opts.provider === 'coachio_nano_banana_2') {
     let imagesUrl: string[] | undefined;
     if (doodleRefs.length > 0 && opts.coachioApiKey) {
       try {
@@ -429,11 +556,13 @@ export const generateDoodleImage = async (
         console.warn('Coachio character upload failed, generating without refs:', e);
       }
     }
+    const modelIdentifier = opts.provider === 'coachio_nano_banana_2' ? 'nano-banana-2' : 'gpt_image_2';
     return generateImageWithCoachio({
       apiKey: opts.coachioApiKey || '',
       prompt: fullPrompt,
       aspectRatio,
       imagesUrl,
+      modelIdentifier,
     });
   }
 
@@ -539,8 +668,8 @@ ${doodleRefs.map((r, i) => `      - Character ${i + 1} ("${r.label}"): ${r.style
       The title text must be in the same language as written above (do NOT translate).
     `;
 
-    // Coachio path
-    if (opts.provider === 'coachio_gpt_image_2') {
+    // Coachio path (either gpt_image_2 or nano-banana-2)
+    if (opts.provider === 'coachio_gpt_image_2' || opts.provider === 'coachio_nano_banana_2') {
       let imagesUrl: string[] | undefined;
       if (doodleRefs.length > 0 && opts.coachioApiKey) {
         try {
@@ -554,11 +683,13 @@ ${doodleRefs.map((r, i) => `      - Character ${i + 1} ("${r.label}"): ${r.style
           console.warn('Coachio character upload failed, generating without refs:', e);
         }
       }
+      const modelIdentifier = opts.provider === 'coachio_nano_banana_2' ? 'nano-banana-2' : 'gpt_image_2';
       return generateImageWithCoachio({
         apiKey: opts.coachioApiKey || '',
         prompt,
         aspectRatio,
         imagesUrl,
+        modelIdentifier,
       });
     }
 
@@ -758,19 +889,49 @@ const createWavHeader = (dataLength: number, sampleRate: number = 24000) => {
   return buffer;
 };
 
+/** Speaker gender selection for Gemini TTS. */
+export type TtsGender = 'female' | 'male';
+
 /**
- * Generate Speech using Gemini TTS
+ * Map (language, gender) → Gemini prebuilt voice name. Picks voices that
+ * read each language naturally:
+ *
+ *   Kore   — female, warm + clear (great for VN/JA narration)
+ *   Aoede  — female, brighter + younger feel (English-leaning)
+ *   Puck   — male,   energetic, used by Better-Than-Yesterday-style EN channels
+ *   Charon — male,   deeper / authoritative (good fit for VN/JA stoic tone)
+ *
+ * If Gemini drops one of these names in a future release the call falls
+ * back to 'Kore' so we never hard-fail TTS.
+ */
+const GEMINI_VOICE_BY_LANG_GENDER: Record<Language, Record<TtsGender, string>> = {
+  Vietnamese: { female: 'Kore',  male: 'Charon' },
+  Japanese:   { female: 'Kore',  male: 'Charon' },
+  English:    { female: 'Aoede', male: 'Puck' },
+};
+
+/**
+ * Generate Speech using Gemini TTS.
+ *
+ *  - language: drives the default voice mapping
+ *  - styleInstruction: optional natural-language style hint prepended to the
+ *    prompt (e.g. "Read calmly with long pauses")
+ *  - gender: 'female' (default) or 'male' — picks from
+ *    GEMINI_VOICE_BY_LANG_GENDER above
  */
 export const generateSpeech = async (
   text: string,
   language: Language,
   styleInstruction?: string,
+  gender: TtsGender = 'female',
 ): Promise<Blob | null> => {
   if (!getActiveGeminiKey()) {
-    throw new Error("Cần Gemini API key để tạo voiceover (Coachio chưa hỗ trợ TTS).");
+    throw new Error("Cần Gemini API key để tạo voiceover bằng Gemini TTS.");
   }
   const ai = getAI();
-  const config = LANGUAGE_CONFIG[language];
+  const voiceName =
+    GEMINI_VOICE_BY_LANG_GENDER[language]?.[gender] ||
+    LANGUAGE_CONFIG[language].voiceName;
 
   // Gemini TTS picks up natural-language style hints when they sit above the
   // text to read. Empty / whitespace-only styles are skipped so the default
@@ -786,7 +947,7 @@ export const generateSpeech = async (
         responseModalities: [Modality.AUDIO],
         speechConfig: {
           voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: config.voiceName },
+            prebuiltVoiceConfig: { voiceName },
           },
         },
       },

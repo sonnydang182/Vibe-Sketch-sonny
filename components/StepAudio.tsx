@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Button } from './Button';
-import { Scene, GenerationConfig, AudioProvider } from '../types';
+import { Scene, GenerationConfig, AudioProvider, Language } from '../types';
 import { COACHIO_VOICES } from '../services/coachioService';
 
 interface StepAudioProps {
@@ -16,14 +16,18 @@ interface StepAudioProps {
   duration: GenerationConfig['duration'];
   onChangeDuration: (d: GenerationConfig['duration']) => void;
   audioProvider: AudioProvider;
+  /** Drives provider auto-pick (English → Coachio, else → Gemini). */
+  language: Language;
   hasGeminiKey: boolean;
   hasCoachioKey: boolean;
   onOpenSettings: () => void;
   /** Per-project voice settings — live-editable in this step (persisted via App). */
   coachioTtsVoice: string;
   geminiTtsStyle: string;
+  geminiTtsGender: 'female' | 'male';
   onChangeCoachioVoice: (voiceId: string) => void;
   onChangeGeminiStyle: (style: string) => void;
+  onChangeGeminiGender: (g: 'female' | 'male') => void;
 }
 
 const DURATIONS: GenerationConfig['duration'][] = ['Short (60s)', 'Medium (3 mins)', 'Long (5-10 mins)'];
@@ -53,16 +57,21 @@ export const StepAudio: React.FC<StepAudioProps> = ({
   duration,
   onChangeDuration,
   audioProvider,
+  language,
   hasGeminiKey,
   hasCoachioKey,
   onOpenSettings,
   coachioTtsVoice,
   geminiTtsStyle,
+  geminiTtsGender,
   onChangeCoachioVoice,
   onChangeGeminiStyle,
+  onChangeGeminiGender,
 }) => {
   const audioRef = useRef<HTMLAudioElement>(null);
-  const isCoachio = audioProvider === 'coachio_elevenlabs';
+  // Provider is LANGUAGE-DRIVEN — App.tsx keeps settings.audioProvider in
+  // sync but we compute locally too in case the effect hasn't fired yet.
+  const isCoachio = language === 'English';
 
   const derivedScript = scenes.map(s => s.voiceover).filter(Boolean).join(' ');
   const [editing, setEditing] = useState(false);
@@ -86,7 +95,18 @@ export const StepAudio: React.FC<StepAudioProps> = ({
   const wordCount = scriptToUse.trim().split(/\s+/).filter(Boolean).length;
   const charCount = scriptToUse.length;
 
-  const providerLabel = isCoachio ? 'Coachio · ElevenLabs' : 'Gemini TTS';
+  const providerLabel = isCoachio
+    ? 'Coachio · ElevenLabs (EN)'
+    : `Gemini TTS (${language})`;
+  // Localized labels for the gender picker — chosen language drives copy.
+  const genderLabels: Record<Language, { female: string; male: string; heading: string; hint: string }> = {
+    Vietnamese: { female: 'Giọng nữ', male: 'Giọng nam', heading: 'Chọn giọng',
+                  hint: 'Gemini TTS — chọn giọng nam/nữ. Đổi ngôn ngữ tự động đổi voice prebuilt.' },
+    English:    { female: 'Female',   male: 'Male',     heading: 'Voice',
+                  hint: 'Gemini TTS — pick male or female. Voice auto-tuned per language.' },
+    Japanese:   { female: '女性ボイス', male: '男性ボイス', heading: 'ボイス',
+                  hint: 'Gemini TTS — 男性 / 女性を選択。言語に応じて自動調整。' },
+  };
   const exportLabel = !audioUrl
     ? (providerKeyMissing ? '⬇ Tải ZIP (không kèm audio)' : '⬇ Tải ZIP')
     : '⬇ Tải ZIP';
@@ -168,9 +188,35 @@ export const StepAudio: React.FC<StepAudioProps> = ({
           </>
         ) : (
           <>
+            {/* Gender picker — first, since it's the primary choice */}
             <div className="flex items-center justify-between gap-3">
-              <label className="font-hand text-lg text-ink">Phong cách đọc</label>
+              <label className="font-hand text-lg text-ink">{genderLabels[language].heading}</label>
               <span className="font-sans text-[11px] text-gray-500">{providerLabel}</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              {(['female', 'male'] as const).map(g => {
+                const active = geminiTtsGender === g;
+                return (
+                  <button
+                    key={g}
+                    onClick={() => onChangeGeminiGender(g)}
+                    className={`
+                      p-3 rounded-lg border-2 text-center transition-all flex items-center justify-center gap-2
+                      ${active
+                        ? 'bg-ink text-paper border-ink shadow-md'
+                        : 'bg-white border-gray-200 text-gray-600 hover:border-gray-400'}
+                    `}
+                  >
+                    <span className="text-xl">{g === 'female' ? '👩' : '👨'}</span>
+                    <span className="font-hand text-base">{genderLabels[language][g]}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Style preset row — secondary tuning */}
+            <div className="flex items-center justify-between gap-3 pt-2">
+              <label className="font-hand text-base text-ink">Phong cách đọc</label>
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
               {GEMINI_STYLE_PRESETS.map(preset => {
@@ -199,7 +245,7 @@ export const StepAudio: React.FC<StepAudioProps> = ({
               className="w-full bg-paper border-2 border-gray-300 focus:border-ink rounded-lg p-2 font-sans text-xs outline-none transition-colors resize-vertical"
             />
             <p className="font-sans text-[11px] text-gray-500">
-              Hướng dẫn được ghép vào đầu prompt TTS. Bỏ trống = giọng mặc định. Tiếng Anh thường ăn hơn tiếng Việt khi mô tả style.
+              {genderLabels[language].hint} Hướng dẫn được ghép vào đầu prompt TTS — bỏ trống = giọng mặc định.
             </p>
           </>
         )}

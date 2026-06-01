@@ -176,8 +176,19 @@ const buildSceneEncodeArgs = (
   let vf: string;
   if (transition === 'ken_burns') {
     const frames = Math.max(2, Math.round(dur * FPS));
-    // 2× pre-scale gives zoompan room to grow without losing detail.
-    vf = `scale=${w * 2}:${h * 2}:flags=lanczos,zoompan=z='min(1+0.08*on/${frames - 1}\\,1.08)':d=${frames}:fps=${FPS}:s=${w}x${h}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)',setsar=1,format=yuv420p`;
+    // Smooth Ken Burns recipe — avoids the classic zoompan jitter:
+    //   1. Pre-scale 8× with lanczos so the cropped viewport has plenty of
+    //      sub-pixels to choose from (1px shifts at output res = ~0.125px
+    //      shifts at the source = imperceptible).
+    //   2. Use the `zoom` accumulator (`zoom+delta`) instead of recomputing
+    //      from frame index — accumulator keeps last frame's zoom, which is
+    //      numerically smoother than `0.08*on/(N-1)` divides.
+    //   3. Cap at 1.04 (was 1.08) — gentler ramp, less visible jitter.
+    //   4. Hold steady at `zoom=1` for the first frame (the d=1 trick), then
+    //      ramp; otherwise the first frame snaps to 1.0008 and feels jumpy.
+    const target = 1.04;
+    const delta = ((target - 1) / Math.max(1, frames - 1)).toFixed(6);
+    vf = `scale=${w * 8}:${h * 8}:flags=lanczos,zoompan=z='min(zoom+${delta}\\,${target})':d=${frames}:fps=${FPS}:s=${w}x${h}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)',setsar=1,format=yuv420p`;
   } else {
     vf = `scale=${w}:${h}:flags=lanczos,setsar=1,fps=${FPS},format=yuv420p`;
   }
@@ -249,7 +260,10 @@ const buildFinalEncodeArgs = (
       "-r", String(FPS),
       "-c:a", "aac",
       "-b:a", "128k",
-      "-shortest",
+      // No `-shortest`: we want the FULL audio in the output, not the
+      // shortest stream. Scene timings + final freeze frame already cover
+      // total audio duration (see alignSceneTimingsToWhisper audioDurationSec
+      // pad), so video is the right length too.
       "out.mp4",
     );
     return args;

@@ -54,6 +54,7 @@ import { BackgroundJobBanner } from './components/BackgroundJobBanner';
 import { hasWhisperProvider, createWhisperProvider } from './services/whisperService';
 import {
   alignSceneTimingsToWhisper,
+  probeAudioDuration,
   WhisperWord,
 } from './services/captionService';
 import {
@@ -101,6 +102,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   groqApiKey: '',
   coachioTtsVoice: COACHIO_VOICES[0].id,
   geminiTtsStyle: '',
+  geminiTtsGender: 'female',
   captionStyle: DEFAULT_CAPTION_STYLE,
   // 'fade' is the default — black-frame gap between scenes basically
   // disappears once a 200-300ms crossfade is on. User can flip to 'cut'
@@ -111,6 +113,7 @@ const DEFAULT_SETTINGS: AppSettings = {
 
 const DEFAULT_CONFIG: GenerationConfig = {
   topic: '',
+  context: '',
   tone: 'Stoic',
   duration: 'Short (60s)',
   aspectRatio: '9:16',
@@ -318,6 +321,18 @@ const App: React.FC = () => {
     } catch {}
   }, [activeProjectId]);
 
+  // Keep settings.audioProvider in sync with the chosen language.
+  //   English   → Coachio ElevenLabs (Mark/Brittney are English-only)
+  //   Other     → Gemini TTS (Coachio voices butcher VN/JA)
+  // This is the source of truth for which provider runs at TTS time. The
+  // Settings page just visualises it.
+  useEffect(() => {
+    const desired = config.language === 'English' ? 'coachio_elevenlabs' : 'gemini';
+    if (settings.audioProvider !== desired) {
+      setSettings(s => ({ ...s, audioProvider: desired }));
+    }
+  }, [config.language, settings.audioProvider]);
+
   // Auto-save current project to history whenever meaningful state changes.
   // Debounced so we don't write on every keystroke.
   useEffect(() => {
@@ -383,6 +398,38 @@ const App: React.FC = () => {
 
     return () => clearTimeout(timer);
   }, [config, titles, scenes, thumbnailUrl, audioBlob, whisperTimings, whisperWords, fullScript, step, lastGeneratedTopic, lastGeneratedTitleId, activeProjectId]);
+
+  // Mount-time auto-restore: if there's an active project on reload, pull its
+  // config/titles/scenes from the in-memory history (loaded from localStorage)
+  // back into wizard state. Without this the page reload shows an empty wizard
+  // even though IndexedDB still has all the assets — so the user thinks the
+  // thumbnail / scenes were lost. The IDB hydration effect below then fills
+  // in the heavy asset URLs (thumbnailUrl, sceneImages[*], audioBlob).
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (restoredRef.current) return;
+    if (!activeProjectId) { restoredRef.current = true; return; }
+    const entry = history.find(h => h.id === activeProjectId);
+    if (!entry) return; // history may still be loading from localStorage
+    restoredRef.current = true;
+    setConfig(migrateConfig(entry.config));
+    setTitles(entry.titles || []);
+    setScenes((entry.scenes || []).map(s => ({
+      ...s,
+      isGeneratingImage: false,
+      isGeneratingAudio: false,
+      audioUrl: undefined,
+      audioError: undefined,
+      audioForText: undefined,
+      error: undefined,
+    })));
+    setFullScript(entry.fullScript || '');
+    setStep(entry.step ?? AppStep.INPUT_TOPIC);
+    setLastGeneratedTopic(entry.lastGeneratedTopic || entry.config?.topic || '');
+    setLastGeneratedTitleId(entry.lastGeneratedTitleId || '');
+    // thumbnailUrl is intentionally left for the IDB hydration step below —
+    // the lite history entry has it stripped (saveHistory drops large fields).
+  }, [activeProjectId, history]);
 
   // On mount, hydrate the active project's assets from IndexedDB so a refresh
   // doesn't lose generated images. We do this once when the activeProjectId is
@@ -554,9 +601,11 @@ const App: React.FC = () => {
     }));
 
     // Smart-fallback: if the saved image provider can't run because its key is
-    // missing, swap to the other one when that one IS available.
+    // missing, swap to the other one when that one IS available. Both Coachio
+    // image models share the same key, so we group them.
     let provider = settings.imageProvider;
-    if (provider === 'coachio_gpt_image_2' && !hasCoachioKey && hasGeminiKey) {
+    const isCoachioImg = provider === 'coachio_gpt_image_2' || provider === 'coachio_nano_banana_2';
+    if (isCoachioImg && !hasCoachioKey && hasGeminiKey) {
       provider = 'gemini';
     } else if (provider === 'gemini' && !hasGeminiKey && hasCoachioKey) {
       provider = 'coachio_gpt_image_2';
@@ -657,16 +706,19 @@ const App: React.FC = () => {
   // --- GENERATION HANDLERS ---
 
   const handleGenerateTitles = async () => {
-    if (titles.length > 0 && config.topic.trim() === lastGeneratedTopic.trim()) {
+    // Cache key folds topic + context together so adding/changing context
+    // invalidates the cached titles and forces a fresh generation.
+    const cacheKey = `${config.topic.trim()}|${(config.context || '').trim()}`;
+    if (titles.length > 0 && cacheKey === lastGeneratedTopic.trim()) {
       setStep(AppStep.SELECT_TITLE);
       return;
     }
 
     setIsLoading(true);
     try {
-      const generated = await generateViralTitles(config.topic, config.tone, config.language);
+      const generated = await generateViralTitles(config.topic, config.tone, config.language, config.context);
       setTitles(generated.map((t, i) => ({ id: `title-${i}`, text: t, selected: false })));
-      setLastGeneratedTopic(config.topic.trim());
+      setLastGeneratedTopic(cacheKey);
       setStep(AppStep.SELECT_TITLE);
     } catch (e) {
       alert("Lỗi tạo tiêu đề. Vui lòng thử lại.");
@@ -706,12 +758,17 @@ const App: React.FC = () => {
 
     setIsLoading(true);
     try {
-      const generatedScenes = await generateScriptScenes(selectedTitle.text, config.duration, config.language);
+      const generatedScenes = await generateScriptScenes(selectedTitle.text, config.duration, config.language, config.context);
+      if (!generatedScenes || generatedScenes.length === 0) {
+        throw new Error('Trả về 0 cảnh — kiểm tra prompt hoặc đổi model.');
+      }
       setScenes(generatedScenes);
       setLastGeneratedTitleId(selectedTitle.id);
       setStep(AppStep.REVIEW_SCRIPT);
     } catch (e) {
-      alert("Lỗi tạo kịch bản.");
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error('handleGenerateScript:', e);
+      alert(`Lỗi tạo kịch bản:\n${msg}`);
     } finally {
       setIsLoading(false);
     }
@@ -1002,8 +1059,15 @@ const App: React.FC = () => {
    * (10× the cost). Per-scene caption timing is recovered downstream by
    * running Whisper alignment on the combined audio.
    *
-   *  - Gemini: prepends settings.geminiTtsStyle as a tone instruction.
-   *  - Coachio (ElevenLabs v2): uses settings.coachioTtsVoice for the voice id.
+   * Provider is LANGUAGE-DRIVEN:
+   *  - English   → Coachio ElevenLabs (Mark / Brittney) — English-only voices
+   *  - VN / JA   → Gemini TTS (Coachio's English voices can't pronounce them).
+   *                Requires a Gemini API key. Uses settings.geminiTtsGender
+   *                + settings.geminiTtsStyle.
+   *
+   * settings.audioProvider is kept in sync with this derivation (see
+   * useEffect on config.language) so the UI and Settings page reflect what
+   * will actually run.
    */
   const handleGenerateAudio = async (overrideScript?: string) => {
     const text = (overrideScript && overrideScript.trim())
@@ -1015,15 +1079,19 @@ const App: React.FC = () => {
       return;
     }
 
+    // Derive provider from language — overrides settings so the user can't
+    // accidentally try Coachio English voices on a VN script.
+    const useCoachio = config.language === 'English';
+
     setIsLoading(true);
     try {
       if (audioUrl) URL.revokeObjectURL(audioUrl);
 
       let blob: Blob | null = null;
-      if (settings.audioProvider === 'coachio_elevenlabs') {
+      if (useCoachio) {
         const key = settings.coachioApiKey?.trim();
         if (!key) {
-          alert("Cần Coachio API key (vào Cấu hình để dán).");
+          alert("Cần Coachio API key cho TTS tiếng Anh (vào Cấu hình để dán).");
           return;
         }
         blob = await generateAudioWithCoachio({
@@ -1032,7 +1100,16 @@ const App: React.FC = () => {
           voice: settings.coachioTtsVoice || COACHIO_VOICES[0].id,
         });
       } else {
-        blob = await generateSpeech(text, config.language, settings.geminiTtsStyle);
+        if (!settings.geminiApiKey?.trim()) {
+          alert("Cần Gemini API key để tạo TTS cho tiếng Việt / Nhật / khác (vào Cấu hình để dán).");
+          return;
+        }
+        blob = await generateSpeech(
+          text,
+          config.language,
+          settings.geminiTtsStyle,
+          settings.geminiTtsGender,
+        );
       }
 
       if (blob) {
@@ -1123,7 +1200,16 @@ const App: React.FC = () => {
     try {
       const blob = await (await fetch(audioUrl)).blob();
       const words = await provider.transcribeWithTimestamps(blob, config.language);
-      const timings = alignSceneTimingsToWhisper(scenes, words, config.language);
+      // Probe actual audio duration so we can pad the last scene to cover
+      // trailing silence — without this the render is cut short (see fix
+      // for "57s audio → 50s render" bug).
+      let audioDurationSec: number | undefined;
+      try {
+        audioDurationSec = await probeAudioDuration(audioUrl);
+      } catch (probeErr) {
+        console.warn('probeAudioDuration failed, last scene won\'t be padded', probeErr);
+      }
+      const timings = alignSceneTimingsToWhisper(scenes, words, config.language, audioDurationSec);
       setWhisperTimings(timings);
       setWhisperWords(words);
     } catch (e: any) {
@@ -1360,13 +1446,16 @@ const App: React.FC = () => {
             duration={config.duration}
             onChangeDuration={(d) => setConfig(prev => ({ ...prev, duration: d }))}
             audioProvider={settings.audioProvider}
+            language={config.language}
             hasGeminiKey={hasGeminiKey}
             hasCoachioKey={hasCoachioKey}
             onOpenSettings={() => setView('settings')}
             coachioTtsVoice={settings.coachioTtsVoice || COACHIO_VOICES[0].id}
             geminiTtsStyle={settings.geminiTtsStyle || ''}
+            geminiTtsGender={settings.geminiTtsGender || 'female'}
             onChangeCoachioVoice={(voiceId) => setSettings(s => ({ ...s, coachioTtsVoice: voiceId }))}
             onChangeGeminiStyle={(style) => setSettings(s => ({ ...s, geminiTtsStyle: style }))}
+            onChangeGeminiGender={(g) => setSettings(s => ({ ...s, geminiTtsGender: g }))}
           />
         );
       case AppStep.GENERATE_VIDEO:

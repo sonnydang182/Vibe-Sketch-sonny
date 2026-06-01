@@ -51,11 +51,36 @@ export interface ProjectAssets {
 const tx = (db: IDBDatabase, mode: IDBTransactionMode) =>
   db.transaction(STORE, mode).objectStore(STORE);
 
+/**
+ * Save assets. To prevent races (e.g. autosave running before hydration
+ * completes — thumbnailUrl briefly `undefined` in state would clobber the
+ * saved value), we MERGE: undefined fields in the new payload keep the
+ * previously-stored value; non-undefined fields overwrite. For
+ * sceneImages we always take the new map (so removed scene images are
+ * actually removed).
+ */
 export const saveProjectAssets = async (id: string, assets: ProjectAssets): Promise<void> => {
   try {
     const db = await getDB();
+    // Use a single readwrite transaction so the read+write is atomic.
+    const store = db.transaction(STORE, 'readwrite').objectStore(STORE);
+    const prev: ProjectAssets | null = await new Promise((resolve, reject) => {
+      const req = store.get(id);
+      req.onsuccess = () => resolve((req.result as ProjectAssets | undefined) ?? null);
+      req.onerror = () => reject(req.error);
+    });
+    const merged: ProjectAssets = {
+      // sceneImages is authoritative on the new payload — caller computes
+      // it from current scenes, so it must reflect deletions.
+      sceneImages: assets.sceneImages,
+      // The rest preserve previous values when the new one is undefined.
+      thumbnailUrl: assets.thumbnailUrl ?? prev?.thumbnailUrl,
+      audioBlob: assets.audioBlob ?? prev?.audioBlob,
+      whisperTimings: assets.whisperTimings ?? prev?.whisperTimings,
+      whisperWords: assets.whisperWords ?? prev?.whisperWords,
+    };
     await new Promise<void>((resolve, reject) => {
-      const req = tx(db, 'readwrite').put(assets, id);
+      const req = store.put(merged, id);
       req.onsuccess = () => resolve();
       req.onerror = () => reject(req.error);
     });
