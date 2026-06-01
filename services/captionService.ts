@@ -1,4 +1,4 @@
-import { Scene, Language, SceneTiming, CaptionStyle } from "../types";
+import { Scene, Language, SceneTiming, CaptionStyle, CaptionMode } from "../types";
 
 /**
  * Pure-JS caption + timing utilities. No external API needed.
@@ -195,6 +195,133 @@ export const probeAudioDuration = (audioUrl: string): Promise<number> =>
   });
 
 // ---------------------------------------------------------------------------
+// Caption chunking — split each scene's voiceover into time-stamped chunks
+// so the preview / ASS render shows a small window at a time instead of the
+// full paragraph (which obscures the frame).
+// ---------------------------------------------------------------------------
+
+export interface CaptionChunk {
+  sceneId: string;
+  start: number;
+  end: number;
+  text: string;
+  /** Marks the karaoke-highlighted word when present (mode = karaoke). */
+  highlightIndex?: number;
+}
+
+/**
+ * Distribute a scene's words across its time window in equal-sized chunks.
+ * Used for word_chunks / single_word / karaoke-without-Whisper modes.
+ */
+const evenChunks = (
+  text: string,
+  start: number,
+  end: number,
+  sceneId: string,
+  wordsPerChunk: number,
+): CaptionChunk[] => {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [];
+  const size = Math.max(1, wordsPerChunk);
+  const numChunks = Math.max(1, Math.ceil(words.length / size));
+  const totalDur = Math.max(0.1, end - start);
+  const perDur = totalDur / numChunks;
+
+  return Array.from({ length: numChunks }, (_, i) => ({
+    sceneId,
+    start: start + i * perDur,
+    end: i === numChunks - 1 ? end : start + (i + 1) * perDur,
+    text: words.slice(i * size, (i + 1) * size).join(' '),
+  }));
+};
+
+/**
+ * Karaoke chunks built from Whisper word-level timestamps. Returns one chunk
+ * per word, with the *entire* current line shown but a highlightIndex marking
+ * which token is currently spoken. The line itself is reset every `lineSize`
+ * words so the frame stays readable.
+ */
+const karaokeChunks = (
+  text: string,
+  start: number,
+  end: number,
+  sceneId: string,
+  whisperWords: WhisperWord[],
+  lineSize: number,
+): CaptionChunk[] => {
+  // We restrict to whisper words that fall inside this scene's [start, end].
+  // (Some drift is normal — align margins by ±0.1s.)
+  const inScope = whisperWords.filter(w => w.start >= start - 0.15 && w.end <= end + 0.15);
+  if (inScope.length === 0) {
+    return evenChunks(text, start, end, sceneId, lineSize);
+  }
+
+  const chunks: CaptionChunk[] = [];
+  for (let i = 0; i < inScope.length; i += lineSize) {
+    const line = inScope.slice(i, i + lineSize);
+    const lineText = line.map(w => w.text).join(' ').replace(/\s+([,.!?;:])/g, '$1');
+    for (let j = 0; j < line.length; j++) {
+      const w = line[j];
+      chunks.push({
+        sceneId,
+        start: w.start,
+        end: j === line.length - 1
+          ? (line[line.length - 1].end)
+          : line[j + 1].start, // until the next word starts
+        text: lineText,
+        highlightIndex: j,
+      });
+    }
+  }
+  return chunks;
+};
+
+/**
+ * Build the master list of caption chunks across all scenes, picked by mode.
+ *
+ * The result is what both the preview and the ASS exporter consume — keep
+ * them in sync so what the user sees during preview matches the final mp4.
+ */
+export const buildCaptionChunks = (
+  scenes: Scene[],
+  timings: SceneTiming[],
+  style: CaptionStyle,
+  whisperWords?: WhisperWord[],
+): CaptionChunk[] => {
+  const byId = new Map(scenes.map(s => [s.id, s] as const));
+  const out: CaptionChunk[] = [];
+
+  for (const t of timings) {
+    const scene = byId.get(t.sceneId);
+    const text = scene?.voiceover?.trim();
+    if (!scene || !text) continue;
+
+    const mode: CaptionMode = style.mode;
+    const chunkSize = Math.max(2, Math.min(8, style.chunkWords || 4));
+
+    if (mode === 'full_scene') {
+      out.push({ sceneId: scene.id, start: t.start, end: t.end, text });
+      continue;
+    }
+
+    if (mode === 'single_word') {
+      out.push(...evenChunks(text, t.start, t.end, scene.id, 1));
+      continue;
+    }
+
+    if (mode === 'karaoke' && whisperWords && whisperWords.length > 0) {
+      out.push(...karaokeChunks(text, t.start, t.end, scene.id, whisperWords, chunkSize));
+      continue;
+    }
+
+    // word_chunks (default) — or karaoke fallback when no Whisper words.
+    out.push(...evenChunks(text, t.start, t.end, scene.id, chunkSize));
+  }
+
+  return out;
+};
+
+// ---------------------------------------------------------------------------
 // ASS (Advanced SubStation Alpha) exporter — used for ffmpeg subtitles filter
 // ---------------------------------------------------------------------------
 
@@ -245,22 +372,25 @@ const alignmentFor = (pos: CaptionStyle['position']): number =>
   pos === 'top' ? 8 : pos === 'middle' ? 5 : 2;
 
 /**
- * Build a per-scene ASS subtitle file. One Dialogue line per scene — the whole
- * voiceover text shows for the entire scene window. Karaoke per-word can be
- * layered on top in a follow-up when WhisperWord timestamps are threaded
- * through to the render call.
+ * Build an ASS subtitle file from caption chunks. Each chunk becomes one
+ * Dialogue line; single_word mode auto-bumps the font size for TikTok-style
+ * pop. Karaoke chunks emit per-word `\k` highlight overrides when the
+ * `highlightIndex` field is present.
  */
 export const buildASS = (
-  scenes: Scene[],
-  timings: SceneTiming[],
+  chunks: CaptionChunk[],
   style: CaptionStyle,
   aspect: '16:9' | '9:16',
 ): string => {
   const { w, h } = renderResolution(aspect);
-  const byId = new Map(scenes.map(s => [s.id, s] as const));
 
-  const fontSize = fontSizeFor(style.size, h);
+  // Single-word mode wants the text to feel BIG. Bump the calibrated size by
+  // 60% so it visually pops without forcing the user to switch to "Large".
+  const baseFontSize = fontSizeFor(style.size, h);
+  const fontSize = style.mode === 'single_word' ? Math.round(baseFontSize * 1.6) : baseFontSize;
+
   const primaryColor = ASS_COLORS[style.textColor];
+  const secondaryColor = ASS_COLORS[style.highlight] ?? ASS_COLORS.yellow;
   const outlineColor = ASS_COLORS.black;
   const backColor = style.background ? '&H80000000' : '&H00000000';
   const borderStyle = style.background ? 3 : 1; // 3 = opaque box, 1 = outline only
@@ -278,18 +408,28 @@ export const buildASS = (
     '',
     '[V4+ Styles]',
     'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-    `Style: Default,Arial,${fontSize},${primaryColor},${ASS_COLORS.yellow},${outlineColor},${backColor},1,0,0,0,100,100,0,0,${borderStyle},${outlineW},${shadowW},${alignment},40,40,${marginV},1`,
+    `Style: Default,Arial,${fontSize},${primaryColor},${secondaryColor},${outlineColor},${backColor},1,0,0,0,100,100,0,0,${borderStyle},${outlineW},${shadowW},${alignment},40,40,${marginV},1`,
     '',
     '[Events]',
     'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
   ].join('\n');
 
-  const dialogues = timings
-    .map(t => {
-      const scene = byId.get(t.sceneId);
-      if (!scene || !scene.voiceover.trim()) return null;
-      const text = escapeAssText(scene.voiceover.trim());
-      return `Dialogue: 0,${formatAss(t.start)},${formatAss(t.end)},Default,,0,0,0,,${text}`;
+  const dialogues = chunks
+    .map(c => {
+      const trimmed = c.text.trim();
+      if (!trimmed) return null;
+      let text = escapeAssText(trimmed);
+
+      // Karaoke highlight — wrap the active word in a color override.
+      if (c.highlightIndex !== undefined) {
+        const words = trimmed.split(/\s+/);
+        if (c.highlightIndex >= 0 && c.highlightIndex < words.length) {
+          words[c.highlightIndex] = `{\\c${secondaryColor}&}${words[c.highlightIndex]}{\\c${primaryColor}&}`;
+          text = escapeAssText(words.join(' ')).replace(/\\\{/g, '{').replace(/\\\}/g, '}');
+        }
+      }
+
+      return `Dialogue: 0,${formatAss(c.start)},${formatAss(c.end)},Default,,0,0,0,,${text}`;
     })
     .filter(Boolean)
     .join('\n');

@@ -1,5 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Scene, SceneTiming, CaptionStyle } from '../types';
+import { buildCaptionChunks, CaptionChunk, WhisperWord } from '../services/captionService';
 
 interface VideoPreviewProps {
   scenes: Scene[];
@@ -7,6 +8,8 @@ interface VideoPreviewProps {
   audioUrl: string;
   captionStyle: CaptionStyle;
   aspectRatio: '16:9' | '9:16';
+  /** When present, enables karaoke mode in the preview. */
+  whisperWords?: WhisperWord[];
 }
 
 /**
@@ -14,9 +17,11 @@ interface VideoPreviewProps {
  * voiceover audio. Drives off requestAnimationFrame for smooth scene switches
  * even when the audio's native `timeupdate` fires only ~4x/s.
  *
- * Caption CSS is hand-tuned to roughly match what ffmpeg's ASS render will
- * produce — same position, similar font weight + outline. Not pixel-perfect
- * but close enough to make creative decisions without waiting for a render.
+ * Caption mode (style.mode) decides what text shows when:
+ *   - full_scene → whole scene voiceover for the scene window
+ *   - word_chunks → ~chunkWords words at a time
+ *   - single_word → one word, big & centered
+ *   - karaoke → full line, with the active word highlighted (needs whisperWords)
  */
 export const VideoPreview: React.FC<VideoPreviewProps> = ({
   scenes,
@@ -24,15 +29,15 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
   audioUrl,
   captionStyle,
   aspectRatio,
+  whisperWords,
 }) => {
   const audioRef = useRef<HTMLAudioElement>(null);
   const rafRef = useRef<number | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
 
-  // High-frequency timer: when playing, sample audio.currentTime each frame
-  // so the scene flip happens within ~16ms of the timing boundary instead of
-  // waiting up to 250ms for the native timeupdate event.
+  // High-frequency timer for smooth chunk transitions (native timeupdate is
+  // ~4Hz which makes word-level captions feel laggy).
   useEffect(() => {
     const el = audioRef.current;
     if (!el) return;
@@ -68,17 +73,32 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
     };
   }, [isPlaying]);
 
+  // Compute caption chunks once per (scenes, timings, style) change so we're
+  // not re-splitting strings 60 times a second.
+  const chunks = useMemo(
+    () => buildCaptionChunks(scenes, timings, captionStyle, whisperWords),
+    [scenes, timings, captionStyle, whisperWords],
+  );
+
   const sceneById = new Map<string, Scene>(scenes.map(s => [s.id, s]));
   const activeTiming = timings.find(t => currentTime >= t.start && currentTime < t.end) ?? null;
   const activeScene: Scene | null = activeTiming
     ? sceneById.get(activeTiming.sceneId) ?? null
     : null;
 
-  const captionInline = captionStyleToCSS(captionStyle);
+  const activeChunk: CaptionChunk | null = useMemo(() => {
+    if (!chunks.length) return null;
+    // Binary-ish lookup is overkill — caption chunks max out ~100 per video.
+    return chunks.find(c => currentTime >= c.start && currentTime < c.end) ?? null;
+  }, [chunks, currentTime]);
+
+  const captionInline = useMemo(
+    () => captionStyleToCSS(captionStyle),
+    [captionStyle],
+  );
   const frameAspect = aspectRatio === '16:9' ? '16 / 9' : '9 / 16';
   const maxHeight = aspectRatio === '9:16' ? 480 : undefined;
 
-  // Quick scrubber: jump to a scene's start when its number is clicked.
   const jumpToScene = (sceneId: string) => {
     const t = timings.find(x => x.sceneId === sceneId);
     const el = audioRef.current;
@@ -104,19 +124,12 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
             {scenes.length === 0 ? 'Chưa có scene' : 'Chưa có ảnh cho cảnh hiện tại'}
           </div>
         )}
-        {activeScene?.voiceover && (
-          <div style={captionInline}>
-            {activeScene.voiceover}
-          </div>
+        {activeChunk?.text && (
+          <CaptionLine chunk={activeChunk} style={captionInline} captionStyle={captionStyle} />
         )}
       </div>
 
-      <audio
-        ref={audioRef}
-        src={audioUrl}
-        controls
-        className="w-full h-10"
-      />
+      <audio ref={audioRef} src={audioUrl} controls className="w-full h-10" />
 
       {/* Scene scrubber strip */}
       {timings.length > 0 && (
@@ -145,6 +158,40 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
   );
 };
 
+/**
+ * Render one caption line. Karaoke highlight overrides the per-word color
+ * for the active token; other modes just emit the chunk text.
+ */
+const CaptionLine: React.FC<{
+  chunk: CaptionChunk;
+  style: React.CSSProperties;
+  captionStyle: CaptionStyle;
+}> = ({ chunk, style, captionStyle }) => {
+  if (chunk.highlightIndex === undefined) {
+    return <div style={style}>{chunk.text}</div>;
+  }
+
+  const words = chunk.text.split(/\s+/);
+  const highlightColor = HIGHLIGHT_COLOR[captionStyle.highlight];
+
+  return (
+    <div style={style}>
+      {words.map((w, i) => (
+        <span
+          key={i}
+          style={{
+            color: i === chunk.highlightIndex ? highlightColor : undefined,
+            marginRight: i < words.length - 1 ? '0.3em' : 0,
+            transition: 'color 80ms linear',
+          }}
+        >
+          {w}
+        </span>
+      ))}
+    </div>
+  );
+};
+
 // ---------------------------------------------------------------------------
 // Caption style → CSS — mirrors the ffmpeg ASS render closely enough that
 // what you see in the preview is what you get in the final mp4.
@@ -157,10 +204,18 @@ const COLOR = {
   yellow: '#FFD400',
 } as const;
 
+const HIGHLIGHT_COLOR = {
+  yellow: '#FFD400',
+  red: '#FF3B3B',
+  cyan: '#00E0FF',
+  green: '#3CCB7F',
+} as const;
+
 const captionStyleToCSS = (style: CaptionStyle): React.CSSProperties => {
-  const fontSize = SIZE_PX[style.size];
+  // Match the ASS bump: single-word mode renders bigger for impact.
+  const baseFontSize = SIZE_PX[style.size];
+  const fontSize = style.mode === 'single_word' ? Math.round(baseFontSize * 1.6) : baseFontSize;
   const outline = `${Math.max(2, Math.round(fontSize / 12))}px`;
-  // text-shadow trick to fake a 4-direction outline (matches ASS BorderStyle=1).
   const textShadow = [
     `${outline} ${outline} 0 #000`,
     `-${outline} ${outline} 0 #000`,

@@ -59,7 +59,22 @@ export type CaptionHighlight = 'yellow' | 'red' | 'cyan' | 'green';
 /** Caption text size preset. Maps to ASS font sizes per render resolution. */
 export type CaptionSize = 'small' | 'medium' | 'large';
 
+/**
+ * How the caption text flows over time inside one scene.
+ *
+ *  - full_scene: show the entire scene voiceover for the whole scene window.
+ *  - word_chunks: show ~chunkWords words at a time, advancing within the
+ *    scene window (good default — keeps the frame uncluttered).
+ *  - single_word: pop one word at a time, TikTok-style.
+ *  - karaoke: per-word highlight using Whisper word-level timestamps; falls
+ *    back to word_chunks when no Whisper alignment has been run.
+ */
+export type CaptionMode = 'full_scene' | 'word_chunks' | 'single_word' | 'karaoke';
+
 export interface CaptionStyle {
+  mode: CaptionMode;
+  /** Number of words per chunk when mode === 'word_chunks'. Range 2–8. */
+  chunkWords: number;
   position: CaptionPosition;
   size: CaptionSize;
   /** Primary text colour — white is the safest CTR pick. */

@@ -6,6 +6,7 @@ import {
   SceneTiming,
   Language,
   CaptionStyle,
+  CaptionMode,
   CaptionPosition,
   CaptionSize,
   CaptionHighlight,
@@ -16,6 +17,7 @@ import {
   buildSRT,
   buildVTT,
   probeAudioDuration,
+  WhisperWord,
 } from '../services/captionService';
 
 interface StepVideoProps {
@@ -26,6 +28,8 @@ interface StepVideoProps {
   /** When false, the "Khớp với Whisper" button is disabled with an info hint. */
   hasWhisperProvider: boolean;
   whisperTimings: SceneTiming[] | null;
+  /** Raw Whisper word stream — enables karaoke mode when present. */
+  whisperWords?: WhisperWord[];
   isAligningWhisper: boolean;
   whisperError?: string;
   onAlignWithWhisper: () => void;
@@ -56,6 +60,13 @@ const formatClock = (s: number): string => {
 };
 
 // -------- Caption preset options (compact UI vocabulary) --------
+
+const MODES: { id: CaptionMode; label: string; hint: string; requiresWhisper?: boolean }[] = [
+  { id: 'word_chunks', label: 'Cụm từ', hint: 'Hiển thị 3–5 từ một lúc (mặc định)' },
+  { id: 'single_word', label: 'Một từ', hint: 'Pop từng từ, font tự to (TikTok style)' },
+  { id: 'karaoke', label: 'Karaoke', hint: 'Highlight từ đang đọc — cần Whisper', requiresWhisper: true },
+  { id: 'full_scene', label: 'Cả câu', hint: 'Hiện toàn bộ lời dẫn (có thể che khung)' },
+];
 
 const POSITIONS: { id: CaptionPosition; label: string }[] = [
   { id: 'bottom', label: 'Dưới' },
@@ -104,6 +115,7 @@ export const StepVideo: React.FC<StepVideoProps> = ({
   aspectRatio,
   hasWhisperProvider,
   whisperTimings,
+  whisperWords,
   isAligningWhisper,
   whisperError,
   onAlignWithWhisper,
@@ -261,6 +273,51 @@ export const StepVideo: React.FC<StepVideoProps> = ({
           <div className="font-hand text-lg text-ink">Cấu hình caption</div>
         </div>
 
+        {/* Mode picker — the primary "how does caption flow" decision */}
+        <div className="space-y-1.5">
+          <label className="font-sans text-xs uppercase tracking-wider text-gray-500">Phong cách caption</label>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+            {MODES.map(m => {
+              const disabled = m.requiresWhisper && (!whisperWords || whisperWords.length === 0);
+              const active = captionStyle.mode === m.id;
+              return (
+                <button
+                  key={m.id}
+                  onClick={() => onChangeCaptionStyle({ ...captionStyle, mode: m.id })}
+                  disabled={disabled}
+                  title={disabled ? 'Cần khớp Whisper trước (Bước 1)' : m.hint}
+                  className={`
+                    flex flex-col items-start text-left p-2.5 rounded-md border-2 transition-all min-h-[58px]
+                    ${active
+                      ? 'bg-ink text-paper border-ink shadow-md'
+                      : 'bg-white border-gray-200 text-gray-700 hover:border-gray-400'}
+                    ${disabled ? 'opacity-40 cursor-not-allowed' : ''}
+                  `}
+                >
+                  <span className="font-hand text-base">{m.label}</span>
+                  <span className={`font-sans text-[10px] leading-snug ${active ? 'text-paper/70' : 'text-gray-500'}`}>
+                    {m.hint}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          {captionStyle.mode === 'word_chunks' && (
+            <div className="flex items-center gap-3 pt-2">
+              <label className="font-sans text-xs text-gray-600">Số từ / cụm:</label>
+              <input
+                type="range"
+                min={2}
+                max={8}
+                value={captionStyle.chunkWords}
+                onChange={e => onChangeCaptionStyle({ ...captionStyle, chunkWords: Number(e.target.value) })}
+                className="flex-1 accent-ink"
+              />
+              <span className="font-mono text-sm text-ink min-w-[1.5em] text-center">{captionStyle.chunkWords}</span>
+            </div>
+          )}
+        </div>
+
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {/* Position */}
           <div className="space-y-1.5">
@@ -326,7 +383,7 @@ export const StepVideo: React.FC<StepVideoProps> = ({
           {/* Highlight color (reserved for karaoke per-word) */}
           <div className="space-y-1.5">
             <label className="font-sans text-xs uppercase tracking-wider text-gray-500">
-              Màu highlight <span className="text-gray-400">(karaoke — sắp ra mắt)</span>
+              Màu highlight <span className="text-gray-400">(dùng cho karaoke)</span>
             </label>
             <div className="grid grid-cols-4 gap-1.5">
               {HIGHLIGHTS.map(h => (
@@ -374,6 +431,7 @@ export const StepVideo: React.FC<StepVideoProps> = ({
             audioUrl={audioUrl}
             captionStyle={captionStyle}
             aspectRatio={aspectRatio}
+            whisperWords={whisperWords}
           />
         ) : (
           <div className="text-center py-8 font-hand text-gray-400">
@@ -511,7 +569,7 @@ export const StepVideo: React.FC<StepVideoProps> = ({
       </section>
 
       <div className="text-xs text-gray-500 font-sans p-3 bg-ink/[0.02] rounded-lg border border-ink/5">
-        💡 Caption per-scene đã render xong. Karaoke per-word (highlight từng từ theo audio) sẽ có trong PR sau — cần thread Whisper word timestamps vào ASS.
+        💡 Đổi phong cách caption ở Bước 2 → preview ở Bước 3 cập nhật ngay → render mp4 khi chốt. Karaoke chỉ bật được sau khi khớp Whisper ở Bước 1.
       </div>
     </div>
   );

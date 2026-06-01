@@ -6,7 +6,12 @@ import {
   CaptionStyle,
   VideoRenderProgress,
 } from "../types";
-import { buildASS, renderResolution } from "./captionService";
+import {
+  buildASS,
+  buildCaptionChunks,
+  renderResolution,
+  WhisperWord,
+} from "./captionService";
 
 /**
  * ffmpeg.wasm wrapper that ties together scene images, the combined voiceover,
@@ -65,6 +70,8 @@ interface AssembleParams {
   audioBlob: Blob;
   aspectRatio: "16:9" | "9:16";
   captionStyle: CaptionStyle;
+  /** Optional Whisper word-level timestamps — enables karaoke mode. */
+  whisperWords?: WhisperWord[];
   onProgress?: (p: VideoRenderProgress) => void;
   signal?: AbortSignal;
 }
@@ -88,6 +95,7 @@ export const assembleVideo = async (params: AssembleParams): Promise<Blob> => {
     audioBlob,
     aspectRatio,
     captionStyle,
+    whisperWords,
     onProgress,
     signal,
   } = params;
@@ -140,8 +148,10 @@ export const assembleVideo = async (params: AssembleParams): Promise<Blob> => {
     concatLines.push(`file '${ordered[ordered.length - 1].scene.imageUrl ? `img_${String(ordered.length - 1).padStart(3, "0")}.png` : ""}'`);
     await ffmpeg.writeFile("concat.txt", concatLines.join("\n"));
 
-    // ASS subtitle.
-    const ass = buildASS(scenes, timings, captionStyle, aspectRatio);
+    // ASS subtitle — compute chunks first (full scene / word chunks / single
+    // word / karaoke), then emit one Dialogue line per chunk.
+    const chunks = buildCaptionChunks(scenes, timings, captionStyle, whisperWords);
+    const ass = buildASS(chunks, captionStyle, aspectRatio);
     await ffmpeg.writeFile("captions.ass", ass);
     check();
 

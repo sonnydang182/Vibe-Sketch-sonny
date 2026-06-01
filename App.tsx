@@ -54,6 +54,7 @@ import { BackgroundJobBanner } from './components/BackgroundJobBanner';
 import { hasWhisperProvider, createWhisperProvider } from './services/whisperService';
 import {
   alignSceneTimingsToWhisper,
+  WhisperWord,
 } from './services/captionService';
 import {
   assembleVideo,
@@ -66,6 +67,8 @@ const HISTORY_KEY = 'vibesketch.history.v1';
 const ACTIVE_PROJECT_KEY = 'vibesketch.activeProjectId.v1';
 
 const DEFAULT_CAPTION_STYLE: CaptionStyle = {
+  mode: 'word_chunks',
+  chunkWords: 4,
   position: 'bottom',
   size: 'medium',
   textColor: 'white',
@@ -247,6 +250,8 @@ const App: React.FC = () => {
 
   // Whisper alignment (step 7)
   const [whisperTimings, setWhisperTimings] = useState<SceneTiming[] | null>(null);
+  /** Raw word-level Whisper output — needed for karaoke caption mode. */
+  const [whisperWords, setWhisperWords] = useState<WhisperWord[] | undefined>(undefined);
   const [isAligningWhisper, setIsAligningWhisper] = useState(false);
   const [whisperError, setWhisperError] = useState<string | undefined>(undefined);
 
@@ -1029,6 +1034,7 @@ const App: React.FC = () => {
       const words = await provider.transcribeWithTimestamps(blob, config.language);
       const timings = alignSceneTimingsToWhisper(scenes, words, config.language);
       setWhisperTimings(timings);
+      setWhisperWords(words);
     } catch (e: any) {
       console.error("Whisper alignment failed", e);
       setWhisperError(e?.message || String(e));
@@ -1040,6 +1046,7 @@ const App: React.FC = () => {
   // Drop stale alignment whenever the underlying audio or scene list changes.
   useEffect(() => {
     setWhisperTimings(null);
+    setWhisperWords(undefined);
     setWhisperError(undefined);
   }, [audioUrl, scenes]);
 
@@ -1071,6 +1078,7 @@ const App: React.FC = () => {
         audioBlob,
         aspectRatio: config.aspectRatio,
         captionStyle: settings.captionStyle,
+        whisperWords,
         signal: ac.signal,
         onProgress: setRenderProgress,
       });
@@ -1101,7 +1109,7 @@ const App: React.FC = () => {
     }
     setRenderError(undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [audioUrl, scenes, settings.captionStyle, config.aspectRatio]);
+  }, [audioUrl, scenes, settings.captionStyle, config.aspectRatio, whisperWords]);
 
   const handleExportZip = async () => {
     const zip = new JSZip();
@@ -1281,6 +1289,7 @@ const App: React.FC = () => {
               groqApiKey: settings.groqApiKey,
             })}
             whisperTimings={whisperTimings}
+            whisperWords={whisperWords}
             isAligningWhisper={isAligningWhisper}
             whisperError={whisperError}
             onAlignWithWhisper={handleAlignWithWhisper}
