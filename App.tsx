@@ -102,6 +102,11 @@ const DEFAULT_SETTINGS: AppSettings = {
   coachioTtsVoice: COACHIO_VOICES[0].id,
   geminiTtsStyle: '',
   captionStyle: DEFAULT_CAPTION_STYLE,
+  // 'fade' is the default — black-frame gap between scenes basically
+  // disappears once a 200-300ms crossfade is on. User can flip to 'cut'
+  // for the previous instant-swap behaviour or 'ken_burns' for cinematic.
+  transition: 'fade',
+  transitionDuration: 0.25,
 };
 
 const DEFAULT_CONFIG: GenerationConfig = {
@@ -359,7 +364,8 @@ const App: React.FC = () => {
         return trimmed;
       });
 
-      // Persist images + thumbnail + audio to IndexedDB so they survive F5.
+      // Persist images + thumbnail + audio + whisper alignment to IndexedDB
+      // so refresh or project switch never loses generated state.
       const sceneImages: Record<string, string> = {};
       scenes.forEach(s => {
         if (s.imageUrl) sceneImages[s.id] = s.imageUrl;
@@ -368,13 +374,15 @@ const App: React.FC = () => {
         sceneImages,
         thumbnailUrl,
         audioBlob: audioBlob || undefined,
+        whisperTimings: whisperTimings ?? undefined,
+        whisperWords: whisperWords ?? undefined,
       });
 
       if (!activeProjectId) setActiveProjectId(id);
     }, 800);
 
     return () => clearTimeout(timer);
-  }, [config, titles, scenes, thumbnailUrl, audioBlob, fullScript, step, lastGeneratedTopic, lastGeneratedTitleId, activeProjectId]);
+  }, [config, titles, scenes, thumbnailUrl, audioBlob, whisperTimings, whisperWords, fullScript, step, lastGeneratedTopic, lastGeneratedTitleId, activeProjectId]);
 
   // On mount, hydrate the active project's assets from IndexedDB so a refresh
   // doesn't lose generated images. We do this once when the activeProjectId is
@@ -401,6 +409,13 @@ const App: React.FC = () => {
         // Object URL lives only this session — recreate from the saved Blob.
         setAudioBlob(prev => prev ?? assets.audioBlob ?? null);
         setAudioUrl(prev => prev ?? URL.createObjectURL(assets.audioBlob!));
+      }
+      // Whisper alignment — restore if the user already paid for it.
+      if (assets.whisperTimings?.length) {
+        setWhisperTimings(prev => prev ?? assets.whisperTimings as SceneTiming[]);
+      }
+      if (assets.whisperWords?.length) {
+        setWhisperWords(prev => prev ?? assets.whisperWords);
       }
     })();
   }, [activeProjectId]);
@@ -473,6 +488,12 @@ const App: React.FC = () => {
       if (assets.audioBlob) {
         setAudioBlob(assets.audioBlob);
         setAudioUrl(URL.createObjectURL(assets.audioBlob));
+      }
+      if (assets.whisperTimings?.length) {
+        setWhisperTimings(assets.whisperTimings as SceneTiming[]);
+      }
+      if (assets.whisperWords?.length) {
+        setWhisperWords(assets.whisperWords);
       }
     })();
   };
@@ -1149,6 +1170,8 @@ const App: React.FC = () => {
         aspectRatio: config.aspectRatio,
         captionStyle: settings.captionStyle,
         whisperWords,
+        transition: settings.transition,
+        transitionDuration: settings.transitionDuration,
         signal: ac.signal,
         onProgress: setRenderProgress,
       });
@@ -1179,7 +1202,7 @@ const App: React.FC = () => {
     }
     setRenderError(undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [audioUrl, scenes, settings.captionStyle, config.aspectRatio, whisperWords]);
+  }, [audioUrl, scenes, settings.captionStyle, settings.transition, settings.transitionDuration, config.aspectRatio, whisperWords]);
 
   const handleExportZip = async () => {
     const zip = new JSZip();
@@ -1376,6 +1399,10 @@ const App: React.FC = () => {
             onCancelRender={handleCancelRender}
             videoRenderSupported={isVideoRenderSupported()}
             onEditSceneCaption={handleEditSceneCaption}
+            transition={settings.transition ?? 'fade'}
+            transitionDuration={settings.transitionDuration ?? 0.25}
+            onChangeTransition={(t) => setSettings(s => ({ ...s, transition: t }))}
+            onChangeTransitionDuration={(sec) => setSettings(s => ({ ...s, transitionDuration: sec }))}
           />
         );
       default:

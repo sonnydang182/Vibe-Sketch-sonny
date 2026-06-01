@@ -5,6 +5,7 @@ import {
   SceneTiming,
   CaptionStyle,
   VideoRenderProgress,
+  SceneTransition,
 } from "../types";
 import {
   buildASS,
@@ -64,6 +65,126 @@ const getFFmpeg = async (
  */
 const urlToUint8 = async (url: string): Promise<Uint8Array> => fetchFile(url);
 
+interface BuildArgsParams {
+  ordered: Array<{ scene: Scene; timing: SceneTiming; imageUrl: string }>;
+  audioExt: string;
+  w: number;
+  h: number;
+  transition: SceneTransition;
+  transitionDuration: number;
+}
+
+/**
+ * Generate the ffmpeg cli args for the chosen scene transition.
+ *
+ *  - cut: concat demuxer over the playlist we wrote (cheapest path).
+ *  - fade: one `-loop 1 -t <dur> -i img.png` per scene, scaled to render
+ *    resolution, chained through xfade transitions, then subtitles burned in.
+ *  - ken_burns: same multi-input setup, each scene gets a zoompan ramp
+ *    (1.0 → 1.08 across its own duration), then concat'd and subtitled.
+ */
+const buildEncodeArgs = ({
+  ordered,
+  audioExt,
+  w,
+  h,
+  transition,
+  transitionDuration,
+}: BuildArgsParams): string[] => {
+  const n = ordered.length;
+  const fps = 24;
+  const subtitleClause = "subtitles=captions.ass";
+
+  // Cut path — fast concat demuxer.
+  if (transition === 'cut' || n < 2) {
+    return [
+      "-y",
+      "-f", "concat",
+      "-safe", "0",
+      "-i", "concat.txt",
+      "-i", `audio.${audioExt}`,
+      "-vf", `scale=${w}:${h}:flags=lanczos,${subtitleClause},format=yuv420p`,
+      "-c:v", "libx264",
+      "-preset", "ultrafast",
+      "-tune", "stillimage",
+      "-r", String(fps),
+      "-c:a", "aac",
+      "-b:a", "128k",
+      "-shortest",
+      "out.mp4",
+    ];
+  }
+
+  // Multi-input setup — used by both fade and ken_burns paths.
+  const args: string[] = ["-y"];
+  for (let i = 0; i < n; i++) {
+    const dur = Math.max(0.1, ordered[i].timing.end - ordered[i].timing.start);
+    args.push(
+      "-loop", "1",
+      "-t", dur.toFixed(3),
+      "-i", `img_${String(i).padStart(3, "0")}.png`,
+    );
+  }
+  args.push("-i", `audio.${audioExt}`);
+  const audioInputIndex = n;
+
+  let filter: string;
+
+  if (transition === 'fade') {
+    // Scale each input to render resolution + format normalisation.
+    const scaleLines = Array.from({ length: n }, (_, i) =>
+      `[${i}:v]scale=${w}:${h}:flags=lanczos,setsar=1,format=yuv420p[v${i}]`
+    );
+    // Chain xfade. offset = cumulative duration so far minus transition time.
+    const xfadeLines: string[] = [];
+    let cursor = 0;
+    let prevLabel = 'v0';
+    for (let i = 0; i < n - 1; i++) {
+      cursor += ordered[i].timing.end - ordered[i].timing.start;
+      const offset = Math.max(0, cursor - transitionDuration);
+      const outLabel = `vx${i + 1}`;
+      xfadeLines.push(
+        `[${prevLabel}][v${i + 1}]xfade=transition=fade:duration=${transitionDuration.toFixed(3)}:offset=${offset.toFixed(3)}[${outLabel}]`,
+      );
+      prevLabel = outLabel;
+    }
+    filter = [
+      ...scaleLines,
+      ...xfadeLines,
+      `[${prevLabel}]${subtitleClause}[vout]`,
+    ].join(";");
+  } else {
+    // ken_burns: per-scene zoompan ramp from 1.0 → 1.08, then concat.
+    const lines: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const dur = Math.max(0.1, ordered[i].timing.end - ordered[i].timing.start);
+      const frames = Math.max(2, Math.round(dur * fps));
+      lines.push(
+        `[${i}:v]scale=${w * 2}:${h * 2}:flags=lanczos,zoompan=z='min(1+0.08*on/${frames - 1}\\,1.08)':d=${frames}:fps=${fps}:s=${w}x${h}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)',setsar=1,format=yuv420p[v${i}]`,
+      );
+    }
+    const concatInputs = Array.from({ length: n }, (_, i) => `[v${i}]`).join('');
+    lines.push(`${concatInputs}concat=n=${n}:v=1:a=0[vcat]`);
+    lines.push(`[vcat]${subtitleClause}[vout]`);
+    filter = lines.join(";");
+  }
+
+  args.push(
+    "-filter_complex", filter,
+    "-map", "[vout]",
+    "-map", `${audioInputIndex}:a`,
+    "-c:v", "libx264",
+    "-preset", "ultrafast",
+    "-tune", "stillimage",
+    "-r", String(fps),
+    "-c:a", "aac",
+    "-b:a", "128k",
+    "-shortest",
+    "out.mp4",
+  );
+  return args;
+};
+
 interface AssembleParams {
   scenes: Scene[];
   timings: SceneTiming[];
@@ -72,6 +193,10 @@ interface AssembleParams {
   captionStyle: CaptionStyle;
   /** Optional Whisper word-level timestamps — enables karaoke mode. */
   whisperWords?: WhisperWord[];
+  /** Scene transition mode (default 'cut'). */
+  transition?: SceneTransition;
+  /** Crossfade duration in seconds (only used for transition === 'fade'). */
+  transitionDuration?: number;
   onProgress?: (p: VideoRenderProgress) => void;
   signal?: AbortSignal;
 }
@@ -96,6 +221,8 @@ export const assembleVideo = async (params: AssembleParams): Promise<Blob> => {
     aspectRatio,
     captionStyle,
     whisperWords,
+    transition = 'cut',
+    transitionDuration = 0.25,
     onProgress,
     signal,
   } = params;
@@ -154,21 +281,26 @@ export const assembleVideo = async (params: AssembleParams): Promise<Blob> => {
     await ffmpeg.writeFile(`audio.${audioExt}`, await urlToUint8(URL.createObjectURL(audioBlob)));
     check();
 
-    // Scene images.
-    const concatLines: string[] = [];
+    // Scene images: written once each, indexed by ordered position.
     for (let i = 0; i < ordered.length; i++) {
-      const { timing, imageUrl } = ordered[i];
+      const { imageUrl } = ordered[i];
       const fname = `img_${String(i).padStart(3, "0")}.png`;
       await ffmpeg.writeFile(fname, await urlToUint8(imageUrl));
-      const dur = Math.max(0.1, timing.end - timing.start);
-      concatLines.push(`file '${fname}'`);
-      concatLines.push(`duration ${dur.toFixed(3)}`);
       check();
     }
-    // The concat demuxer requires the LAST file to be repeated without a
-    // `duration` line — otherwise ffmpeg may cut the final image early.
-    concatLines.push(`file 'img_${String(ordered.length - 1).padStart(3, "0")}.png'`);
-    await ffmpeg.writeFile("concat.txt", concatLines.join("\n"));
+
+    // Concat demuxer playlist — used only when transition === 'cut'.
+    if (transition === 'cut') {
+      const concatLines: string[] = [];
+      for (let i = 0; i < ordered.length; i++) {
+        const dur = Math.max(0.1, ordered[i].timing.end - ordered[i].timing.start);
+        concatLines.push(`file 'img_${String(i).padStart(3, "0")}.png'`);
+        concatLines.push(`duration ${dur.toFixed(3)}`);
+      }
+      // ffmpeg's concat demuxer needs the last file repeated without duration.
+      concatLines.push(`file 'img_${String(ordered.length - 1).padStart(3, "0")}.png'`);
+      await ffmpeg.writeFile("concat.txt", concatLines.join("\n"));
+    }
 
     // ASS subtitle — compute chunks first (full scene / word chunks / single
     // word / karaoke), then emit one Dialogue line per chunk.
@@ -179,34 +311,26 @@ export const assembleVideo = async (params: AssembleParams): Promise<Blob> => {
 
     emit({ phase: "write_assets", ratio: 0.35, message: "Đã ghi xong assets" });
 
-    // ----- 3. Encode -----
+    // ----- 3. Encode — three pipelines depending on transition mode -----
     const { w, h } = renderResolution(aspectRatio);
     emit({ phase: "encode", ratio: 0.4, message: "Bắt đầu encode..." });
 
     const onFfmpegProgress = ({ progress }: { progress: number }) => {
-      // ffmpeg progress lands in [0..1]; map into our 0.4..0.95 window.
       const r = Math.max(0, Math.min(1, progress));
       emit({ phase: "encode", ratio: 0.4 + r * 0.55, message: `Encoding ${Math.round(r * 100)}%` });
     };
     ffmpeg.on("progress", onFfmpegProgress);
 
     try {
-      await ffmpeg.exec([
-        "-y",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", "concat.txt",
-        "-i", `audio.${audioExt}`,
-        "-vf", `scale=${w}:${h}:flags=lanczos,subtitles=captions.ass,format=yuv420p`,
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-tune", "stillimage",
-        "-r", "24",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-shortest",
-        "out.mp4",
-      ]);
+      const args = buildEncodeArgs({
+        ordered,
+        audioExt,
+        w,
+        h,
+        transition,
+        transitionDuration,
+      });
+      await ffmpeg.exec(args);
     } finally {
       ffmpeg.off("progress", onFfmpegProgress);
     }

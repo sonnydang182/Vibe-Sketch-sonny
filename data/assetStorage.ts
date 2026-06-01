@@ -39,6 +39,13 @@ export interface ProjectAssets {
    * The accompanying object URL is recreated at hydrate time.
    */
   audioBlob?: Blob;
+  /**
+   * Whisper alignment outputs — persisted so the user doesn't lose ~$0.005
+   * of API spend whenever they reload or switch projects. Both fields are
+   * serialised as plain JSON arrays in IDB.
+   */
+  whisperTimings?: Array<{ sceneId: string; start: number; end: number; source: 'whisper' | 'estimated' }>;
+  whisperWords?: Array<{ text: string; start: number; end: number }>;
 }
 
 const tx = (db: IDBDatabase, mode: IDBTransactionMode) =>

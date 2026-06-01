@@ -123,6 +123,16 @@ export interface GenerationConfig {
   character?: CharacterId;
 }
 
+/**
+ * Visual transition between scenes during render + preview.
+ *
+ *  - cut: hard scene swap (cheapest, fastest render)
+ *  - fade: crossfade between consecutive scenes (xfade in ffmpeg)
+ *  - ken_burns: slow zoom-in on every scene; no crossfade between
+ *    scenes but each scene's image is animated — cinematic feel
+ */
+export type SceneTransition = 'cut' | 'fade' | 'ken_burns';
+
 export interface AppSettings {
   imageProvider: ImageProvider;
   audioProvider: AudioProvider;
@@ -140,6 +150,10 @@ export interface AppSettings {
   geminiTtsStyle: string;
   /** Caption render style — persisted so the picker remembers the last choice. */
   captionStyle: CaptionStyle;
+  /** Scene transition mode for both preview and final mp4. */
+  transition: SceneTransition;
+  /** Crossfade duration in seconds (only used when transition === 'fade'). */
+  transitionDuration: number;
 }
 
 export interface HistoryEntry {

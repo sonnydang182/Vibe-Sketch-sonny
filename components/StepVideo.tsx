@@ -10,6 +10,7 @@ import {
   CaptionPosition,
   CaptionHighlight,
   VideoRenderProgress,
+  SceneTransition,
 } from '../types';
 import {
   estimateSceneTimings,
@@ -56,6 +57,12 @@ interface StepVideoProps {
    * inside the scene's window so karaoke mode reflects the correction.
    */
   onEditSceneCaption: (sceneId: string, text: string) => void;
+
+  // Scene transition (persisted via settings).
+  transition: SceneTransition;
+  transitionDuration: number;
+  onChangeTransition: (t: SceneTransition) => void;
+  onChangeTransitionDuration: (sec: number) => void;
 }
 
 const formatClock = (s: number): string => {
@@ -82,6 +89,12 @@ const POSITIONS: { id: CaptionPosition; label: string }[] = [
 
 /** Quick presets next to the size slider — covers most use cases in one tap. */
 const SIZE_PRESETS = [20, 28, 36, 48, 64, 80];
+
+const TRANSITIONS: { id: SceneTransition; label: string; hint: string }[] = [
+  { id: 'fade', label: 'Fade', hint: 'Crossfade mượt giữa các cảnh (mặc định)' },
+  { id: 'ken_burns', label: 'Ken Burns', hint: 'Zoom chậm 1.0 → 1.08 mỗi cảnh — cinematic' },
+  { id: 'cut', label: 'Cut', hint: 'Cắt cứng, nhanh nhất, render nhẹ nhất' },
+];
 
 const HIGHLIGHTS: { id: CaptionHighlight; label: string; swatch: string }[] = [
   { id: 'yellow', label: 'Vàng', swatch: '#FFD400' },
@@ -135,6 +148,10 @@ export const StepVideo: React.FC<StepVideoProps> = ({
   onCancelRender,
   videoRenderSupported,
   onEditSceneCaption,
+  transition,
+  transitionDuration,
+  onChangeTransition,
+  onChangeTransitionDuration,
 }) => {
   const [editingSceneId, setEditingSceneId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState('');
@@ -447,13 +464,61 @@ export const StepVideo: React.FC<StepVideoProps> = ({
 
       {/* 3. Live preview — assembled scenes + audio + captions */}
       <section className="bg-white/50 backdrop-blur-sm p-4 rounded-xl border-2 border-ink/10 space-y-3">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <span className="font-mono text-[10px] uppercase tracking-wider text-gray-400">Bước 3</span>
           <div className="font-hand text-lg text-ink">Preview</div>
           <span className="font-sans text-[11px] text-gray-500">
             (xem ráp thực tế trước khi render)
           </span>
         </div>
+
+        {/* Scene transition picker — preview reflects it instantly */}
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <label className="font-sans text-xs uppercase tracking-wider text-gray-500">Chuyển cảnh</label>
+            {transition === 'fade' && (
+              <div className="flex items-center gap-2">
+                <span className="font-sans text-[11px] text-gray-500">Thời lượng:</span>
+                <input
+                  type="range"
+                  min={0.1}
+                  max={1}
+                  step={0.05}
+                  value={transitionDuration}
+                  onChange={e => onChangeTransitionDuration(Number(e.target.value))}
+                  className="w-32 accent-ink"
+                />
+                <span className="font-mono text-xs text-ink bg-white border border-ink/10 rounded px-1.5">
+                  {transitionDuration.toFixed(2)}s
+                </span>
+              </div>
+            )}
+          </div>
+          <div className="grid grid-cols-3 gap-1.5">
+            {TRANSITIONS.map(t => {
+              const active = transition === t.id;
+              return (
+                <button
+                  key={t.id}
+                  onClick={() => onChangeTransition(t.id)}
+                  title={t.hint}
+                  className={`
+                    flex flex-col items-start text-left p-2 rounded-md border-2 transition-all
+                    ${active
+                      ? 'bg-ink text-paper border-ink shadow-md'
+                      : 'bg-white border-gray-200 text-gray-700 hover:border-gray-400'}
+                  `}
+                >
+                  <span className="font-hand text-sm">{t.label}</span>
+                  <span className={`font-sans text-[10px] leading-snug ${active ? 'text-paper/70' : 'text-gray-500'}`}>
+                    {t.hint}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
         {canCaption && audioUrl ? (
           <VideoPreview
             scenes={scenes}
@@ -462,6 +527,8 @@ export const StepVideo: React.FC<StepVideoProps> = ({
             captionStyle={captionStyle}
             aspectRatio={aspectRatio}
             whisperWords={whisperWords}
+            transition={transition}
+            transitionDuration={transitionDuration}
           />
         ) : (
           <div className="text-center py-8 font-hand text-gray-400">

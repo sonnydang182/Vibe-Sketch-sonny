@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Scene, SceneTiming, CaptionStyle } from '../types';
+import { Scene, SceneTiming, CaptionStyle, SceneTransition } from '../types';
 import { buildCaptionChunks, CaptionChunk, WhisperWord } from '../services/captionService';
 
 interface VideoPreviewProps {
@@ -10,6 +10,10 @@ interface VideoPreviewProps {
   aspectRatio: '16:9' | '9:16';
   /** When present, enables karaoke mode in the preview. */
   whisperWords?: WhisperWord[];
+  /** Scene transition to mirror in the preview (defaults to 'fade'). */
+  transition?: SceneTransition;
+  /** Fade duration in seconds — only matters when transition === 'fade'. */
+  transitionDuration?: number;
 }
 
 /**
@@ -30,6 +34,8 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
   captionStyle,
   aspectRatio,
   whisperWords,
+  transition = 'fade',
+  transitionDuration = 0.25,
 }) => {
   const audioRef = useRef<HTMLAudioElement>(null);
   const rafRef = useRef<number | null>(null);
@@ -81,7 +87,34 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
   );
 
   const sceneById = useMemo(() => new Map<string, Scene>(scenes.map(s => [s.id, s])), [scenes]);
-  const activeTiming = timings.find(t => currentTime >= t.start && currentTime < t.end) ?? null;
+
+  /**
+   * Pick which scene's image / caption is "on screen" right now.
+   *
+   * Order of preference:
+   *   1. Direct window match — currentTime falls inside [start, end).
+   *   2. Pre-roll (before the first scene starts) → show the first scene.
+   *   3. Post-roll (after the last scene ends) → show the last scene.
+   *   4. Gap between scenes (rare with estimated, common with Whisper
+   *      where word-level gaps appear) → show the latest scene that has
+   *      already ended.
+   *
+   * Result: never null while at least one timing exists, so the preview
+   * frame never blanks out to black.
+   */
+  const activeTiming: SceneTiming | null = useMemo(() => {
+    if (timings.length === 0) return null;
+    const match = timings.find(t => currentTime >= t.start && currentTime < t.end);
+    if (match) return match;
+    if (currentTime < timings[0].start) return timings[0];
+    const last = timings[timings.length - 1];
+    if (currentTime >= last.end) return last;
+    for (let i = timings.length - 1; i >= 0; i--) {
+      if (timings[i].end <= currentTime) return timings[i];
+    }
+    return timings[0];
+  }, [timings, currentTime]);
+
   const activeScene: Scene | null = activeTiming
     ? sceneById.get(activeTiming.sceneId) ?? null
     : null;
@@ -146,16 +179,20 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
         className="relative bg-black rounded-lg overflow-hidden mx-auto"
         style={{ aspectRatio: frameAspect, maxHeight, width: aspectRatio === '9:16' ? 270 : '100%' }}
       >
-        {/* Render every unique image once and toggle opacity. Prevents the
-            decode flicker that happens when src swaps on rapid scene cuts. */}
+        {/* Keep every unique image mounted; opacity (+ optional zoom) decides
+            what shows. Eliminates the <img> decode flicker we'd get if src
+            swapped on every scene boundary. */}
         {uniqueImages.length > 0 ? (
           uniqueImages.map(url => (
-            <img
+            <PreviewImage
               key={url}
-              src={url}
-              alt=""
-              className="absolute inset-0 w-full h-full object-cover transition-opacity duration-150"
-              style={{ opacity: url === activeImageUrl ? 1 : 0 }}
+              url={url}
+              isActive={url === activeImageUrl}
+              transition={transition}
+              transitionDuration={transitionDuration}
+              sceneStart={activeTiming?.start ?? 0}
+              sceneEnd={activeTiming?.end ?? 0}
+              currentTime={currentTime}
             />
           ))
         ) : (
@@ -194,6 +231,50 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
         </div>
       )}
     </div>
+  );
+};
+
+/**
+ * One scene image inside the preview frame. Reacts to the chosen scene
+ * transition:
+ *   - cut: opacity 0/1 with no easing — matches a hard scene swap.
+ *   - fade: opacity transition over transitionDuration seconds.
+ *   - ken_burns: opacity fade + a slow scale animation (1.0 → 1.08) that
+ *     runs across the active scene's own duration.
+ */
+const PreviewImage: React.FC<{
+  url: string;
+  isActive: boolean;
+  transition: SceneTransition;
+  transitionDuration: number;
+  sceneStart: number;
+  sceneEnd: number;
+  currentTime: number;
+}> = ({ url, isActive, transition, transitionDuration, sceneStart, sceneEnd, currentTime }) => {
+  // Linear scale from 1.0 at scene start to 1.08 at scene end — only used
+  // when transition === 'ken_burns'. Clamped so it doesn't keep zooming
+  // past the scene window.
+  const kenBurnsScale = useMemo(() => {
+    if (transition !== 'ken_burns') return 1;
+    const dur = Math.max(0.1, sceneEnd - sceneStart);
+    const t = Math.max(0, Math.min(1, (currentTime - sceneStart) / dur));
+    return 1 + t * 0.08;
+  }, [transition, sceneStart, sceneEnd, currentTime]);
+
+  const fadeMs = transition === 'cut' ? 0 : Math.round(transitionDuration * 1000);
+
+  return (
+    <img
+      src={url}
+      alt=""
+      className="absolute inset-0 w-full h-full object-cover"
+      style={{
+        opacity: isActive ? 1 : 0,
+        transition: `opacity ${fadeMs}ms ease-in-out, transform 80ms linear`,
+        transform: isActive && transition === 'ken_burns' ? `scale(${kenBurnsScale.toFixed(4)})` : 'scale(1)',
+        transformOrigin: 'center center',
+      }}
+    />
   );
 };
 
