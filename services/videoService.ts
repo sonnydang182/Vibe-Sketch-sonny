@@ -1,5 +1,5 @@
 import { FFmpeg } from "@ffmpeg/ffmpeg";
-import { toBlobURL, fetchFile } from "@ffmpeg/util";
+import { fetchFile } from "@ffmpeg/util";
 import {
   Scene,
   SceneTiming,
@@ -25,38 +25,126 @@ import {
  */
 
 let ffmpegInstance: FFmpeg | null = null;
+let ffmpegLoadPromise: Promise<FFmpeg> | null = null;
 let isBusy = false;
 
 /**
- * Load and cache the FFmpeg singleton. The first call downloads and JIT-loads
- * the core (~3-5s when bundled same-origin); subsequent calls return instantly.
+ * Stream a URL into a same-origin blob URL while reporting bytes-loaded.
+ *
+ * We don't use `@ffmpeg/util#toBlobURL` here because it does a single `fetch
+ * + arrayBuffer()` which can't surface progress. Without progress the UI
+ * shows "10%" for the entire 32MB wasm download and feels frozen, even
+ * though the network is fine.
+ */
+const fetchWithProgress = async (
+  url: string,
+  mime: string,
+  onProgress?: (loaded: number, total: number | undefined) => void,
+): Promise<string> => {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Fetch ${url} → ${res.status}`);
+
+  const contentLength = res.headers.get("content-length");
+  const total = contentLength ? Number(contentLength) : undefined;
+
+  if (!res.body) {
+    // Older browsers / proxies without streaming bodies — just take the
+    // whole blob in one shot. Progress callback fires once at end.
+    const blob = await res.blob();
+    onProgress?.(blob.size, blob.size);
+    return URL.createObjectURL(new Blob([blob], { type: mime }));
+  }
+
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let loaded = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      chunks.push(value);
+      loaded += value.byteLength;
+      onProgress?.(loaded, total);
+    }
+  }
+  return URL.createObjectURL(new Blob(chunks, { type: mime }));
+};
+
+/** Wrap a promise with a deadline so a hung worker init doesn't UI-freeze. */
+const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
+  Promise.race([
+    p,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms),
+    ),
+  ]);
+
+/**
+ * Load and cache the FFmpeg singleton. The first call downloads the 32MB
+ * wasm and initialises the worker (~5-15s same-origin); subsequent calls
+ * return the cached instance immediately.
+ *
+ * The progress callback reports (ratio in [0..1], message) so the UI can
+ * draw a real download bar for the wasm fetch. Without sub-progress the
+ * load step appeared frozen at 10% for the entire wait.
  */
 const getFFmpeg = async (
-  onProgress?: (msg: string) => void,
+  onProgress?: (ratio: number, message: string) => void,
 ): Promise<FFmpeg> => {
   if (ffmpegInstance) return ffmpegInstance;
+  // Coalesce concurrent callers onto the same in-flight load.
+  if (ffmpegLoadPromise) return ffmpegLoadPromise;
+
   if (typeof SharedArrayBuffer === "undefined") {
     throw new Error(
-      "Trình duyệt chưa cho phép SharedArrayBuffer. Cần COOP/COEP headers (vite dev server đã bật) — thử reload bằng Cmd+Shift+R."
+      "Trình duyệt chưa cho phép SharedArrayBuffer. Cần COOP/COEP headers — thử Cmd+Shift+R.",
     );
   }
 
-  onProgress?.("Tải ffmpeg core...");
-  const inst = new FFmpeg();
-  // Files served from public/ffmpeg-core/ — same-origin. The copy-ffmpeg-core
-  // npm script populates them on postinstall / predev / prebuild.
-  // toBlobURL guarantees the worker's importScripts() gets correct MIME types.
-  const coreURL = await toBlobURL("/ffmpeg-core/ffmpeg-core.js", "text/javascript");
-  const wasmURL = await toBlobURL("/ffmpeg-core/ffmpeg-core.wasm", "application/wasm");
-  inst.on("log", ({ message }) => {
-    // Surface ffmpeg log lines into the browser console so a real failure
-    // (codec missing, bad demuxer arg, etc.) doesn't get swallowed.
-    console.debug("[ffmpeg]", message);
-  });
-  await inst.load({ coreURL, wasmURL });
-  ffmpegInstance = inst;
-  onProgress?.("ffmpeg ready");
-  return inst;
+  ffmpegLoadPromise = (async () => {
+    try {
+      onProgress?.(0.02, "Tải ffmpeg-core.js…");
+      const coreURL = await fetchWithProgress(
+        "/ffmpeg-core/ffmpeg-core.js",
+        "text/javascript",
+      );
+
+      onProgress?.(0.05, "Tải ffmpeg-core.wasm (~32MB)…");
+      const wasmURL = await fetchWithProgress(
+        "/ffmpeg-core/ffmpeg-core.wasm",
+        "application/wasm",
+        (loaded, total) => {
+          const mb = (loaded / 1024 / 1024).toFixed(1);
+          if (total) {
+            const r = loaded / total;
+            onProgress?.(0.05 + r * 0.8, `Tải wasm: ${mb}MB / ${(total / 1024 / 1024).toFixed(0)}MB`);
+          } else {
+            onProgress?.(0.5, `Tải wasm: ${mb}MB…`);
+          }
+        },
+      );
+
+      onProgress?.(0.9, "Khởi tạo ffmpeg worker…");
+      const inst = new FFmpeg();
+      inst.on("log", ({ message }) => {
+        // Surface ffmpeg log lines so codec / demuxer failures aren't silent.
+        console.debug("[ffmpeg]", message);
+      });
+      await withTimeout(inst.load({ coreURL, wasmURL }), 60_000, "ffmpeg.load()");
+      onProgress?.(1, "ffmpeg ready");
+      ffmpegInstance = inst;
+      return inst;
+    } catch (err) {
+      // Allow a fresh attempt next time — don't lock the user out behind a
+      // failed instance.
+      ffmpegInstance = null;
+      throw err;
+    } finally {
+      ffmpegLoadPromise = null;
+    }
+  })();
+
+  return ffmpegLoadPromise;
 };
 
 /**
@@ -268,10 +356,14 @@ export const assembleVideo = async (params: AssembleParams): Promise<Blob> => {
   }
 
   try {
-    emit({ phase: "load_ffmpeg", ratio: 0, message: "Tải ffmpeg core..." });
-    const ffmpeg = await getFFmpeg(m => emit({ phase: "load_ffmpeg", ratio: 0.1, message: m }));
+    emit({ phase: "load_ffmpeg", ratio: 0, message: "Tải ffmpeg core…" });
+    const ffmpeg = await getFFmpeg((r, msg) =>
+      // load_ffmpeg owns 0..0.25 of the overall progress so the wasm
+      // download bar visibly fills instead of pinning at 10%.
+      emit({ phase: "load_ffmpeg", ratio: r * 0.25, message: msg }),
+    );
     check();
-    emit({ phase: "load_ffmpeg", ratio: 0.2, message: "ffmpeg ready" });
+    emit({ phase: "load_ffmpeg", ratio: 0.25, message: "ffmpeg ready" });
 
     // ----- 2. Write assets to FS -----
     emit({ phase: "write_assets", ratio: 0.25, message: "Ghi ảnh + audio vào FS..." });
