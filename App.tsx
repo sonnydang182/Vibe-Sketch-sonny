@@ -39,6 +39,7 @@ import {
   generateAudioWithCoachio,
   COACHIO_VOICES,
 } from './services/coachioService';
+import { generateLocalTts } from './services/localTtsService';
 
 import { StepInput } from './components/StepInput';
 import { StepTitles } from './components/StepTitles';
@@ -103,6 +104,10 @@ const DEFAULT_SETTINGS: AppSettings = {
   coachioTtsVoice: COACHIO_VOICES[0].id,
   geminiTtsStyle: '',
   geminiTtsGender: 'female',
+  localTtsEnabled: false,
+  localTtsUrl: 'http://127.0.0.1:8001',
+  localTtsVoice: '',
+  vietnameseTtsPreference: 'gemini',
   captionStyle: DEFAULT_CAPTION_STYLE,
   // 'fade' is the default — black-frame gap between scenes basically
   // disappears once a 200-300ms crossfade is on. User can flip to 'cut'
@@ -285,12 +290,25 @@ const App: React.FC = () => {
   const [isAligningWhisper, setIsAligningWhisper] = useState(false);
   const [whisperError, setWhisperError] = useState<string | undefined>(undefined);
 
-  // Video render (step 7 — final mp4)
+  // Video render (step 7 — final mp4). Keep both Blob (so it can persist to
+  // IDB / be embedded in JSON export) and object URL (for the player).
   const [videoUrl, setVideoUrl] = useState<string | undefined>(undefined);
+  const [videoBlob, setVideoBlob] = useState<Blob | null>(null);
   const [isRendering, setIsRendering] = useState(false);
   const [renderProgress, setRenderProgress] = useState<VideoRenderProgress | undefined>(undefined);
   const [renderError, setRenderError] = useState<string | undefined>(undefined);
   const renderAbortRef = useRef<AbortController | null>(null);
+
+  // Hydration status — autosave must NOT fire writes to IDB until the
+  // current project's heavy assets (scene images / thumbnail / audio /
+  // whisper) have been loaded into state. Otherwise sceneImages would be
+  // written as `{}` and overwrite the saved entries (saveProjectAssets'
+  // merge logic preserves thumbnail/audio/whisper when undefined, but
+  // sceneImages is authoritative on write so deletions work).
+  //
+  //   'ready'   → no project, or hydration already finished — autosave allowed
+  //   'pending' → activeProjectId just changed, IDB load in flight — autosave blocked
+  const [hydrationStatus, setHydrationStatus] = useState<'ready' | 'pending'>('ready');
 
   // Push API keys into the service module whenever settings change.
   useEffect(() => {
@@ -321,17 +339,35 @@ const App: React.FC = () => {
     } catch {}
   }, [activeProjectId]);
 
-  // Keep settings.audioProvider in sync with the chosen language.
-  //   English   → Coachio ElevenLabs (Mark/Brittney are English-only)
-  //   Other     → Gemini TTS (Coachio voices butcher VN/JA)
-  // This is the source of truth for which provider runs at TTS time. The
-  // Settings page just visualises it.
+  // Keep settings.audioProvider in sync with the chosen language + Vietnamese
+  // sub-preference. The audio step reads audioProvider to render the right
+  // picker UI.
+  //   English    → Coachio ElevenLabs (Mark/Brittney are English-only)
+  //   Vietnamese → local_veneu if local TTS enabled + preference='local',
+  //                else Gemini TTS
+  //   Other      → Gemini TTS
   useEffect(() => {
-    const desired = config.language === 'English' ? 'coachio_elevenlabs' : 'gemini';
+    let desired: typeof settings.audioProvider;
+    if (config.language === 'English') {
+      desired = 'coachio_elevenlabs';
+    } else if (
+      config.language === 'Vietnamese' &&
+      settings.localTtsEnabled &&
+      settings.vietnameseTtsPreference === 'local'
+    ) {
+      desired = 'local_veneu';
+    } else {
+      desired = 'gemini';
+    }
     if (settings.audioProvider !== desired) {
       setSettings(s => ({ ...s, audioProvider: desired }));
     }
-  }, [config.language, settings.audioProvider]);
+  }, [
+    config.language,
+    settings.audioProvider,
+    settings.localTtsEnabled,
+    settings.vietnameseTtsPreference,
+  ]);
 
   // Auto-save current project to history whenever meaningful state changes.
   // Debounced so we don't write on every keystroke.
@@ -341,6 +377,10 @@ const App: React.FC = () => {
       titles.length > 0 ||
       scenes.length > 0;
     if (!hasContent) return;
+    // Hard gate: if we're mid-hydration for the current project, DO NOT
+    // autosave — sceneImages built from current scenes would be empty
+    // (imageUrls aren't loaded yet) and clobber the saved entries.
+    if (hydrationStatus === 'pending') return;
 
     const timer = setTimeout(() => {
       const id = activeProjectId || `proj-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -389,15 +429,22 @@ const App: React.FC = () => {
         sceneImages,
         thumbnailUrl,
         audioBlob: audioBlob || undefined,
+        videoBlob: videoBlob || undefined,
         whisperTimings: whisperTimings ?? undefined,
         whisperWords: whisperWords ?? undefined,
       });
 
-      if (!activeProjectId) setActiveProjectId(id);
+      if (!activeProjectId) {
+        // A fresh project just minted an id — mark it as already-hydrated
+        // so the change to activeProjectId doesn't flip hydrationStatus to
+        // 'pending' and block the next autosave.
+        hydratedRef.current.add(id);
+        setActiveProjectId(id);
+      }
     }, 800);
 
     return () => clearTimeout(timer);
-  }, [config, titles, scenes, thumbnailUrl, audioBlob, whisperTimings, whisperWords, fullScript, step, lastGeneratedTopic, lastGeneratedTitleId, activeProjectId]);
+  }, [config, titles, scenes, thumbnailUrl, audioBlob, videoBlob, whisperTimings, whisperWords, fullScript, step, lastGeneratedTopic, lastGeneratedTitleId, activeProjectId, hydrationStatus]);
 
   // Mount-time auto-restore: if there's an active project on reload, pull its
   // config/titles/scenes from the in-memory history (loaded from localStorage)
@@ -436,33 +483,53 @@ const App: React.FC = () => {
   // first known.
   const hydratedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    if (!activeProjectId || hydratedRef.current.has(activeProjectId)) return;
+    if (!activeProjectId) {
+      // No project to hydrate → autosave is safe to fire immediately.
+      setHydrationStatus('ready');
+      return;
+    }
+    if (hydratedRef.current.has(activeProjectId)) {
+      // Already hydrated this session.
+      setHydrationStatus('ready');
+      return;
+    }
+    // Block autosave until the IDB read finishes — otherwise the autosave
+    // would race the hydration and clobber sceneImages with `{}`.
+    setHydrationStatus('pending');
     hydratedRef.current.add(activeProjectId);
     (async () => {
-      const assets = await loadProjectAssets(activeProjectId);
-      if (!assets) return;
-      if (assets.thumbnailUrl) {
-        // Only hydrate if we don't already have one in memory.
-        setThumbnailUrl(prev => prev ?? assets.thumbnailUrl);
-      }
-      if (Object.keys(assets.sceneImages).length > 0) {
-        setScenes(prev =>
-          prev.map(s => (s.imageUrl || !assets.sceneImages[s.id]
-            ? s
-            : { ...s, imageUrl: assets.sceneImages[s.id] }))
-        );
-      }
-      if (assets.audioBlob) {
-        // Object URL lives only this session — recreate from the saved Blob.
-        setAudioBlob(prev => prev ?? assets.audioBlob ?? null);
-        setAudioUrl(prev => prev ?? URL.createObjectURL(assets.audioBlob!));
-      }
-      // Whisper alignment — restore if the user already paid for it.
-      if (assets.whisperTimings?.length) {
-        setWhisperTimings(prev => prev ?? assets.whisperTimings as SceneTiming[]);
-      }
-      if (assets.whisperWords?.length) {
-        setWhisperWords(prev => prev ?? assets.whisperWords);
+      try {
+        const assets = await loadProjectAssets(activeProjectId);
+        if (assets) {
+          if (assets.thumbnailUrl) {
+            setThumbnailUrl(prev => prev ?? assets.thumbnailUrl);
+          }
+          if (Object.keys(assets.sceneImages).length > 0) {
+            setScenes(prev =>
+              prev.map(s => (s.imageUrl || !assets.sceneImages[s.id]
+                ? s
+                : { ...s, imageUrl: assets.sceneImages[s.id] }))
+            );
+          }
+          if (assets.audioBlob) {
+            setAudioBlob(prev => prev ?? assets.audioBlob ?? null);
+            setAudioUrl(prev => prev ?? URL.createObjectURL(assets.audioBlob!));
+          }
+          if (assets.whisperTimings?.length) {
+            setWhisperTimings(prev => prev ?? assets.whisperTimings as SceneTiming[]);
+          }
+          if (assets.whisperWords?.length) {
+            setWhisperWords(prev => prev ?? assets.whisperWords);
+          }
+          if (assets.videoBlob) {
+            setVideoBlob(prev => prev ?? assets.videoBlob ?? null);
+            setVideoUrl(prev => prev ?? URL.createObjectURL(assets.videoBlob!));
+          }
+        }
+      } finally {
+        // ALWAYS unblock autosave — even if loadProjectAssets failed, we
+        // don't want to permanently freeze persistence.
+        setHydrationStatus('ready');
       }
     })();
   }, [activeProjectId]);
@@ -483,6 +550,9 @@ const App: React.FC = () => {
     if (audioUrl) URL.revokeObjectURL(audioUrl);
     setAudioUrl(undefined);
     setAudioBlob(null);
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
+    setVideoUrl(undefined);
+    setVideoBlob(null);
     setLastGeneratedTopic('');
     setLastGeneratedTitleId('');
     setStep(AppStep.INPUT_TOPIC);
@@ -519,28 +589,43 @@ const App: React.FC = () => {
     setLastGeneratedTitleId(entry.lastGeneratedTitleId || '');
     setAudioUrl(undefined);
     setAudioBlob(null);
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
+    setVideoUrl(undefined);
+    setVideoBlob(null);
     setStep(entry.step ?? AppStep.INPUT_TOPIC);
     setView('create');
 
-    // Async hydrate images + audio from IndexedDB
+    // Async hydrate images + audio + video from IndexedDB. Manual flag the
+    // hydration so the autosave effect doesn't race with us — without this
+    // gate, autosave can fire with sceneImages={} (state hasn't received
+    // the assets yet) and clobber the IDB entry.
+    setHydrationStatus('pending');
     (async () => {
-      const assets = await loadProjectAssets(entry.id);
-      if (!assets) return;
-      if (assets.thumbnailUrl) setThumbnailUrl(assets.thumbnailUrl);
-      if (Object.keys(assets.sceneImages).length > 0) {
-        setScenes(prev =>
-          prev.map(s => ({ ...s, imageUrl: assets.sceneImages[s.id] ?? s.imageUrl }))
-        );
-      }
-      if (assets.audioBlob) {
-        setAudioBlob(assets.audioBlob);
-        setAudioUrl(URL.createObjectURL(assets.audioBlob));
-      }
-      if (assets.whisperTimings?.length) {
-        setWhisperTimings(assets.whisperTimings as SceneTiming[]);
-      }
-      if (assets.whisperWords?.length) {
-        setWhisperWords(assets.whisperWords);
+      try {
+        const assets = await loadProjectAssets(entry.id);
+        if (!assets) return;
+        if (assets.thumbnailUrl) setThumbnailUrl(assets.thumbnailUrl);
+        if (Object.keys(assets.sceneImages).length > 0) {
+          setScenes(prev =>
+            prev.map(s => ({ ...s, imageUrl: assets.sceneImages[s.id] ?? s.imageUrl }))
+          );
+        }
+        if (assets.audioBlob) {
+          setAudioBlob(assets.audioBlob);
+          setAudioUrl(URL.createObjectURL(assets.audioBlob));
+        }
+        if (assets.videoBlob) {
+          setVideoBlob(assets.videoBlob);
+          setVideoUrl(URL.createObjectURL(assets.videoBlob));
+        }
+        if (assets.whisperTimings?.length) {
+          setWhisperTimings(assets.whisperTimings as SceneTiming[]);
+        }
+        if (assets.whisperWords?.length) {
+          setWhisperWords(assets.whisperWords);
+        }
+      } finally {
+        setHydrationStatus('ready');
       }
     })();
   };
@@ -600,16 +685,9 @@ const App: React.FC = () => {
       };
     }));
 
-    // Smart-fallback: if the saved image provider can't run because its key is
-    // missing, swap to the other one when that one IS available. Both Coachio
-    // image models share the same key, so we group them.
-    let provider = settings.imageProvider;
-    const isCoachioImg = provider === 'coachio_gpt_image_2' || provider === 'coachio_nano_banana_2';
-    if (isCoachioImg && !hasCoachioKey && hasGeminiKey) {
-      provider = 'gemini';
-    } else if (provider === 'gemini' && !hasGeminiKey && hasCoachioKey) {
-      provider = 'coachio_gpt_image_2';
-    }
+    // Both Coachio image models share the same key — nothing to fallback to
+    // since Gemini image path was removed. Provider stays as-picked.
+    const provider = settings.imageProvider;
 
     return {
       provider,
@@ -620,31 +698,69 @@ const App: React.FC = () => {
 
   // --- IMPORT / EXPORT LOGIC ---
 
-  const handleExportJSON = () => {
-    const projectData = {
-      version: "1.2",
-      timestamp: new Date().toISOString(),
-      state: {
-        step,
-        config,
-        titles,
-        scenes,
-        thumbnailUrl,
-        lastGeneratedTopic,
-        lastGeneratedTitleId,
-        fullScript
-      }
-    };
+  /** Convert a Blob to a base64 data URL so it can be embedded in JSON. */
+  const blobToDataURL = (blob: Blob): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onloadend = () => resolve(fr.result as string);
+      fr.onerror = () => reject(fr.error);
+      fr.readAsDataURL(blob);
+    });
 
-    const blob = new Blob([JSON.stringify(projectData, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `vibesketch_${config.topic.replace(/[^a-z0-9]/gi, '_').toLowerCase() || 'project'}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+  /** Reverse: data URL → Blob (handles audio/wav, audio/mp3, video/mp4, etc.). */
+  const dataURLToBlob = async (dataUrl: string): Promise<Blob> => {
+    const res = await fetch(dataUrl);
+    return await res.blob();
+  };
+
+  /**
+   * Full-project JSON export. Embeds EVERYTHING (scene images, thumbnail,
+   * audio, video render, whisper alignment) as base64 data URLs so the file
+   * is self-contained — user can move it across machines / browsers and
+   * have nothing missing.
+   *
+   * Trade-off: file can be 20-40MB if the rendered mp4 is included. We use
+   * version "2.0" so importers can detect the new schema; v1.2 imports
+   * still work (older fields all live in `state`).
+   */
+  const handleExportJSON = async () => {
+    try {
+      const audioDataUrl = audioBlob ? await blobToDataURL(audioBlob) : undefined;
+      const videoDataUrl = videoBlob ? await blobToDataURL(videoBlob) : undefined;
+
+      const projectData = {
+        version: "2.0",
+        timestamp: new Date().toISOString(),
+        state: {
+          step,
+          config,
+          titles,
+          scenes,                        // scene images are already inline data URLs in scenes[*].imageUrl
+          thumbnailUrl,
+          lastGeneratedTopic,
+          lastGeneratedTitleId,
+          fullScript,
+          // New in v2.0 — heavy assets inlined so the JSON is self-contained
+          audioDataUrl,                  // base64 data URL of the voiceover (~MB)
+          videoDataUrl,                  // base64 data URL of the rendered mp4 (~MB-tens of MB)
+          whisperTimings,                // already JSON-serializable
+          whisperWords,                  // already JSON-serializable
+        }
+      };
+
+      const blob = new Blob([JSON.stringify(projectData, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `vibesketch_${config.topic.replace(/[^a-z0-9]/gi, '_').toLowerCase() || 'project'}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e: any) {
+      console.error('Export JSON failed', e);
+      alert(`Lỗi xuất JSON: ${e?.message || e}`);
+    }
   };
 
   const handleImportClick = () => {
@@ -656,49 +772,77 @@ const App: React.FC = () => {
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
         const content = e.target?.result as string;
         const data = JSON.parse(content);
 
-        if (data && data.state) {
-          const s = data.state;
-          abortRef.current?.abort();
-          abortRef.current = null;
-          setIsGeneratingBatch(false);
-          setIsGeneratingThumbnail(false);
-          if (audioUrl) URL.revokeObjectURL(audioUrl);
-
-          setActiveProjectId(null); // imported = new project entry
-          setConfig(migrateConfig(s.config));
-          setTitles(s.titles || []);
-          setScenes((s.scenes || []).map((sc: Scene) => ({
-            ...sc,
-            isGeneratingImage: false,
-            isGeneratingAudio: false,
-            audioUrl: undefined,
-            audioError: undefined,
-            audioForText: undefined,
-            error: undefined,
-          })));
-          setThumbnailUrl(s.thumbnailUrl);
-          setThumbnailError(undefined);
-          setLastGeneratedTopic(s.lastGeneratedTopic || s.config?.topic || '');
-          setLastGeneratedTitleId(s.lastGeneratedTitleId || '');
-          setFullScript(s.fullScript || '');
-          setAudioUrl(undefined);
-          setAudioBlob(null);
-          setStep(s.step ?? AppStep.INPUT_TOPIC);
-          setView('create');
-          alert("Đã tải dự án thành công!");
-        } else {
+        if (!data || !data.state) {
           alert("File JSON không hợp lệ.");
+          return;
         }
+
+        const s = data.state;
+        abortRef.current?.abort();
+        abortRef.current = null;
+        setIsGeneratingBatch(false);
+        setIsGeneratingThumbnail(false);
+        if (audioUrl) URL.revokeObjectURL(audioUrl);
+        if (videoUrl) URL.revokeObjectURL(videoUrl);
+
+        setActiveProjectId(null); // imported = new project entry
+        setConfig(migrateConfig(s.config));
+        setTitles(s.titles || []);
+        setScenes((s.scenes || []).map((sc: Scene) => ({
+          ...sc,
+          isGeneratingImage: false,
+          isGeneratingAudio: false,
+          audioUrl: undefined,
+          audioError: undefined,
+          audioForText: undefined,
+          error: undefined,
+        })));
+        setThumbnailUrl(s.thumbnailUrl);
+        setThumbnailError(undefined);
+        setLastGeneratedTopic(s.lastGeneratedTopic || s.config?.topic || '');
+        setLastGeneratedTitleId(s.lastGeneratedTitleId || '');
+        setFullScript(s.fullScript || '');
+        setStep(s.step ?? AppStep.INPUT_TOPIC);
+        setView('create');
+
+        // v2.0 schema: heavy assets (audio + video) are embedded as data URLs,
+        // whisper alignment is plain JSON. Decode any present.
+        try {
+          if (s.audioDataUrl) {
+            const ab = await dataURLToBlob(s.audioDataUrl);
+            setAudioBlob(ab);
+            setAudioUrl(URL.createObjectURL(ab));
+          } else {
+            setAudioUrl(undefined);
+            setAudioBlob(null);
+          }
+          if (s.videoDataUrl) {
+            const vb = await dataURLToBlob(s.videoDataUrl);
+            setVideoBlob(vb);
+            setVideoUrl(URL.createObjectURL(vb));
+          } else {
+            setVideoUrl(undefined);
+            setVideoBlob(null);
+          }
+          if (s.whisperTimings) setWhisperTimings(s.whisperTimings);
+          if (s.whisperWords)   setWhisperWords(s.whisperWords);
+        } catch (assetErr) {
+          console.warn('Asset decode failed (proceeding without):', assetErr);
+        }
+
+        const ver = data.version || '1.x';
+        alert(`Đã tải dự án thành công (schema v${ver}).${s.audioDataUrl ? ' ✓ audio' : ''}${s.videoDataUrl ? ' ✓ video' : ''}`);
       } catch (err) {
         console.error("Import error", err);
-        alert("Lỗi khi đọc file.");
+        alert(`Lỗi khi đọc file: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        if (fileInputRef.current) fileInputRef.current.value = '';
       }
-      if (fileInputRef.current) fileInputRef.current.value = '';
     };
     reader.readAsText(file);
   };
@@ -1079,9 +1223,18 @@ const App: React.FC = () => {
       return;
     }
 
-    // Derive provider from language — overrides settings so the user can't
-    // accidentally try Coachio English voices on a VN script.
-    const useCoachio = config.language === 'English';
+    // Provider routing per language:
+    //   English            → Coachio ElevenLabs (Mark/Brittney).
+    //   Vietnamese         → user picks (Gemini cloud OR Local VieNeu Studio,
+    //                        via settings.vietnameseTtsPreference). Local
+    //                        needs settings.localTtsEnabled + reachable server.
+    //   Japanese / other   → Gemini TTS.
+    const lang = config.language;
+    const useCoachio = lang === 'English';
+    const useLocal =
+      lang === 'Vietnamese' &&
+      settings.localTtsEnabled &&
+      settings.vietnameseTtsPreference === 'local';
 
     setIsLoading(true);
     try {
@@ -1091,7 +1244,7 @@ const App: React.FC = () => {
       if (useCoachio) {
         const key = settings.coachioApiKey?.trim();
         if (!key) {
-          alert("Cần Coachio API key cho TTS tiếng Anh (vào Cấu hình để dán).");
+          alert("Cần Coachio API key cho TTS tiếng Anh (vào Cấu hình → Audio).");
           return;
         }
         blob = await generateAudioWithCoachio({
@@ -1099,14 +1252,28 @@ const App: React.FC = () => {
           text,
           voice: settings.coachioTtsVoice || COACHIO_VOICES[0].id,
         });
+      } else if (useLocal) {
+        try {
+          blob = await generateLocalTts(settings.localTtsUrl, {
+            text,
+            voice: settings.localTtsVoice || undefined,
+          });
+        } catch (localErr: any) {
+          alert(
+            `Không gọi được Local TTS (${settings.localTtsUrl}).\n` +
+            `${localErr?.message || localErr}\n\n` +
+            `Kiểm tra server VieNeu Studio đã chạy, hoặc chuyển sang Gemini trong Bước Audio.`,
+          );
+          return;
+        }
       } else {
         if (!settings.geminiApiKey?.trim()) {
-          alert("Cần Gemini API key để tạo TTS cho tiếng Việt / Nhật / khác (vào Cấu hình để dán).");
+          alert("Cần Gemini API key để tạo TTS cho tiếng Việt / Nhật / khác (vào Cấu hình → Audio).");
           return;
         }
         blob = await generateSpeech(
           text,
-          config.language,
+          lang,
           settings.geminiTtsStyle,
           settings.geminiTtsGender,
         );
@@ -1247,6 +1414,7 @@ const App: React.FC = () => {
     setRenderProgress({ phase: 'load_ffmpeg', ratio: 0, message: 'Bắt đầu...' });
     if (videoUrl) URL.revokeObjectURL(videoUrl);
     setVideoUrl(undefined);
+    setVideoBlob(null);
 
     try {
       const blob = await assembleVideo({
@@ -1263,6 +1431,7 @@ const App: React.FC = () => {
       });
       if (ac.signal.aborted) return;
       const url = URL.createObjectURL(blob);
+      setVideoBlob(blob);
       setVideoUrl(url);
     } catch (e: any) {
       console.error("Video render failed", e);
@@ -1286,6 +1455,7 @@ const App: React.FC = () => {
       URL.revokeObjectURL(videoUrl);
       setVideoUrl(undefined);
     }
+    setVideoBlob(null);
     setRenderError(undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [audioUrl, scenes, settings.captionStyle, settings.transition, settings.transitionDuration, config.aspectRatio, whisperWords]);
@@ -1456,6 +1626,12 @@ const App: React.FC = () => {
             onChangeCoachioVoice={(voiceId) => setSettings(s => ({ ...s, coachioTtsVoice: voiceId }))}
             onChangeGeminiStyle={(style) => setSettings(s => ({ ...s, geminiTtsStyle: style }))}
             onChangeGeminiGender={(g) => setSettings(s => ({ ...s, geminiTtsGender: g }))}
+            localTtsEnabled={settings.localTtsEnabled ?? false}
+            localTtsUrl={settings.localTtsUrl || 'http://127.0.0.1:8001'}
+            localTtsVoice={settings.localTtsVoice || ''}
+            vietnameseTtsPreference={settings.vietnameseTtsPreference || 'gemini'}
+            onChangeLocalTtsVoice={(voiceId) => setSettings(s => ({ ...s, localTtsVoice: voiceId }))}
+            onChangeVietnameseTtsPreference={(p) => setSettings(s => ({ ...s, vietnameseTtsPreference: p }))}
           />
         );
       case AppStep.GENERATE_VIDEO:

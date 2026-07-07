@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Button } from './Button';
 import { AppSettings, ImageProvider } from '../types';
+import { checkLocalTtsHealth, listLocalTtsVoices, DEFAULT_LOCAL_TTS_URL } from '../services/localTtsService';
 
 interface StepSettingsProps {
   settings: AppSettings;
@@ -9,54 +10,46 @@ interface StepSettingsProps {
 
 type FunctionTab = 'text' | 'image' | 'audio' | 'whisper';
 
-interface TabDef {
-  id: FunctionTab;
-  icon: string;
-  label: string;
-  hint: string;
-}
-
-const TABS: TabDef[] = [
-  { id: 'text',    icon: '✍️',  label: 'Tạo Text',    hint: 'LLM cho tiêu đề, kịch bản, gợi ý ngữ cảnh.' },
-  { id: 'image',   icon: '🎨',  label: 'Tạo Ảnh',     hint: 'Model image cho scene + thumbnail.' },
-  { id: 'audio',   icon: '🎙',  label: 'Tạo Audio',   hint: 'TTS voiceover (Coachio cho EN, Gemini cho VN/JA).' },
-  { id: 'whisper', icon: '🔉',  label: 'Whisper',     hint: 'Khớp caption từng từ ở bước video.' },
+const TABS: { id: FunctionTab; icon: string; label: string; hint: string }[] = [
+  { id: 'text',    icon: '✍️',  label: 'Text',    hint: 'Coachio → tiêu đề, kịch bản, gợi ý dàn ý.' },
+  { id: 'image',   icon: '🎨',  label: 'Ảnh',     hint: 'Coachio → ảnh scene + thumbnail. Chọn 1 model.' },
+  { id: 'audio',   icon: '🎙',  label: 'Audio',   hint: 'TTS auto theo ngôn ngữ. Tiếng Việt có tùy chọn Local.' },
+  { id: 'whisper', icon: '🔉',  label: 'Whisper', hint: 'Groq → khớp caption từng từ.' },
 ];
 
-/** Visible status pill — green if a key exists, gray if missing. */
-const StatusPill: React.FC<{ ok: boolean; okLabel: string; missLabel: string }> = ({ ok, okLabel, missLabel }) => (
-  <span className={`font-sans text-[11px] uppercase tracking-wider px-2 py-0.5 rounded ${
-    ok ? 'text-emerald-700 bg-emerald-100' : 'text-gray-500 bg-gray-100'
-  }`}>
-    {ok ? `✓ ${okLabel}` : `· ${missLabel}`}
-  </span>
-);
-
-const IMAGE_PROVIDERS: { id: ImageProvider; label: string; description: string; needs: 'coachio' | 'gemini' }[] = [
+const IMAGE_MODELS: { id: ImageProvider; label: string; description: string }[] = [
   {
     id: 'coachio_gpt_image_2',
-    label: 'Coachio · GPT Image 2',
-    description: 'OpenAI gpt-image-2 qua Coachio. Sắc nét, chữ trong ảnh tốt. Mặc định.',
-    needs: 'coachio',
+    label: 'GPT Image 2',
+    description: 'Sắc nét, chữ trong ảnh tốt. Mặc định.',
   },
   {
     id: 'coachio_nano_banana_2',
-    label: 'Coachio · Nano Banana 2',
-    description: 'Google Nano Banana 2 qua Coachio. Nhanh + rẻ hơn, ổn cho doodle.',
-    needs: 'coachio',
-  },
-  {
-    id: 'gemini',
-    label: 'Gemini 3 Pro Image',
-    description: 'Trực tiếp qua Gemini. Cần Gemini API Key.',
-    needs: 'gemini',
+    label: 'Nano Banana 2',
+    description: 'Nhanh + rẻ hơn, ổn cho doodle.',
   },
 ];
+
+/** Compact status pill: filled if key exists, muted if empty. */
+const KeyPill: React.FC<{ ok: boolean; name: string }> = ({ ok, name }) => (
+  <span className={`font-sans text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded ${
+    ok ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'
+  }`}>
+    {ok ? '✓' : '·'} {name}
+  </span>
+);
 
 export const StepSettings: React.FC<StepSettingsProps> = ({ settings, onSave }) => {
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [saved, setSaved] = useState(false);
   const [tab, setTab] = useState<FunctionTab>('text');
+  const [localCheckState, setLocalCheckState] = useState<
+    { state: 'idle' } | { state: 'checking' } | { state: 'ok'; voiceCount: number } | { state: 'err'; msg: string }
+  >({ state: 'idle' });
+
+  const hasCoachio = Boolean(draft.coachioApiKey?.trim());
+  const hasGemini  = Boolean(draft.geminiApiKey?.trim());
+  const hasGroq    = Boolean(draft.groqApiKey?.trim());
 
   const handleSave = () => {
     onSave(draft);
@@ -64,16 +57,29 @@ export const StepSettings: React.FC<StepSettingsProps> = ({ settings, onSave }) 
     setTimeout(() => setSaved(false), 1500);
   };
 
-  const hasCoachio = Boolean(draft.coachioApiKey?.trim());
-  const hasGemini  = Boolean(draft.geminiApiKey?.trim());
-  const hasGroq    = Boolean(draft.groqApiKey?.trim());
+  const testLocalTts = async () => {
+    const url = draft.localTtsUrl || DEFAULT_LOCAL_TTS_URL;
+    setLocalCheckState({ state: 'checking' });
+    try {
+      const health = await checkLocalTtsHealth(url);
+      if (!health.loaded) {
+        setLocalCheckState({ state: 'err', msg: 'Server chạy nhưng model chưa nạp — chờ 1 lát.' });
+        return;
+      }
+      const voices = await listLocalTtsVoices(url);
+      setLocalCheckState({ state: 'ok', voiceCount: voices.length });
+    } catch (e: any) {
+      setLocalCheckState({ state: 'err', msg: e?.message || String(e) });
+    }
+  };
 
   return (
     <div className="flex flex-col gap-6 max-w-3xl mx-auto w-full animate-fade-in">
       <div>
         <h2 className="font-hand text-4xl font-bold text-ink">Cấu hình</h2>
         <p className="font-sans text-gray-600">
-          API keys + model preference chia theo chức năng. Dán key tương ứng cho mỗi function tab.
+          <strong>Coachio</strong> lo text + ảnh. <strong>Gemini</strong> chỉ dùng cho TTS tiếng Việt/Nhật/khác.
+          <strong> Groq</strong> tuỳ chọn cho caption sync.
         </p>
       </div>
 
@@ -106,78 +112,47 @@ export const StepSettings: React.FC<StepSettingsProps> = ({ settings, onSave }) 
           <p className="font-sans text-sm text-gray-600 italic">{TABS.find(t => t.id === tab)?.hint}</p>
 
           {tab === 'text' && (
-            <>
-              {/* Coachio key — text uses Coachio LLM (gemini-3.1-pro for script) */}
-              <div className="space-y-2">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <label className="font-hand text-xl text-ink">Coachio API Key</label>
-                  <StatusPill ok={hasCoachio} okLabel="đã có" missLabel="trống" />
-                  <span className="font-sans text-[11px] text-gray-500">Dùng cho: tiêu đề, kịch bản, gợi ý ngữ cảnh, rewrite</span>
-                </div>
-                <input
-                  type="password"
-                  autoComplete="off"
-                  value={draft.coachioApiKey}
-                  onChange={e => setDraft({ ...draft, coachioApiKey: e.target.value })}
-                  placeholder="lv_xxxxxxxxxxxxxxxxxxxxxxxx"
-                  className="w-full bg-paper border-2 border-gray-300 focus:border-ink rounded-lg p-3 font-mono text-sm outline-none transition-colors"
-                />
-                <p className="font-sans text-xs text-gray-500">
-                  Script dùng <code className="bg-ink/5 px-1 rounded">google/gemini-3.1-pro</code>, title + outline dùng flash-lite — chọn tự động.
-                </p>
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <label className="font-hand text-xl text-ink">Coachio API Key</label>
+                <KeyPill ok={hasCoachio} name="Coachio" />
               </div>
-
-              {/* Optional Gemini key for text — only used if Coachio absent */}
-              <div className="space-y-2 border-t border-ink/10 pt-5">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <label className="font-hand text-xl text-ink">Gemini API Key</label>
-                  <StatusPill ok={hasGemini} okLabel="đã có" missLabel="trống" />
-                  <span className="font-sans text-[11px] text-gray-500">Fallback nếu không có Coachio</span>
-                </div>
-                <input
-                  type="password"
-                  autoComplete="off"
-                  value={draft.geminiApiKey}
-                  onChange={e => setDraft({ ...draft, geminiApiKey: e.target.value })}
-                  placeholder="AIza..."
-                  className="w-full bg-paper border-2 border-gray-300 focus:border-ink rounded-lg p-3 font-mono text-sm outline-none transition-colors"
-                />
-              </div>
-            </>
+              <input
+                type="password"
+                autoComplete="off"
+                value={draft.coachioApiKey}
+                onChange={e => setDraft({ ...draft, coachioApiKey: e.target.value })}
+                placeholder="lv_xxxxxxxxxxxxxxxxxxxxxxxx"
+                className="w-full bg-paper border-2 border-gray-300 focus:border-ink rounded-lg p-3 font-mono text-sm outline-none transition-colors"
+              />
+              <p className="font-sans text-xs text-gray-500">
+                Script dùng <code className="bg-ink/5 px-1 rounded">google/gemini-3.1-pro</code>,
+                title + outline dùng flash-lite — auto cascade nếu model không có.
+              </p>
+            </div>
           )}
 
           {tab === 'image' && (
             <>
-              {/* Model picker */}
               <div className="space-y-3">
-                <label className="font-hand text-xl text-ink block">Chọn model ảnh</label>
+                <label className="font-hand text-xl text-ink block">Model ảnh</label>
                 <div className="space-y-2">
-                  {IMAGE_PROVIDERS.map(p => {
-                    const active = draft.imageProvider === p.id;
-                    const hasKey = p.needs === 'coachio' ? hasCoachio : hasGemini;
+                  {IMAGE_MODELS.map(m => {
+                    const active = draft.imageProvider === m.id;
                     return (
                       <button
-                        key={p.id}
-                        onClick={() => setDraft({ ...draft, imageProvider: p.id })}
+                        key={m.id}
+                        onClick={() => setDraft({ ...draft, imageProvider: m.id })}
                         className={`
-                          w-full text-left p-4 rounded-lg border-2 transition-all
+                          w-full text-left p-3 rounded-lg border-2 transition-all
                           ${active
                             ? 'bg-ink text-paper border-ink shadow-md'
                             : 'bg-white border-gray-200 text-gray-600 hover:border-gray-400'}
                         `}
                       >
-                        <div className="flex items-center justify-between gap-3 flex-wrap">
-                          <div className="font-hand text-lg">{p.label}</div>
-                          <span className={`font-sans text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded ${
-                            hasKey
-                              ? (active ? 'bg-paper/20 text-paper' : 'bg-emerald-100 text-emerald-700')
-                              : (active ? 'bg-paper/20 text-paper/80' : 'bg-gray-100 text-gray-500')
-                          }`}>
-                            {hasKey ? '✓ key có' : `cần ${p.needs === 'coachio' ? 'Coachio' : 'Gemini'} key`}
-                          </span>
-                        </div>
-                        <div className={`font-sans text-sm mt-1 ${active ? 'text-paper/80' : 'text-gray-500'}`}>
-                          {p.description}
+                        <div className="font-hand text-lg">{m.label}</div>
+                        <div className={`font-sans text-sm mt-0.5 ${active ? 'text-paper/80' : 'text-gray-500'}`}>
+                          {m.description}
                         </div>
                       </button>
                     );
@@ -185,12 +160,10 @@ export const StepSettings: React.FC<StepSettingsProps> = ({ settings, onSave }) 
                 </div>
               </div>
 
-              {/* Keys for image */}
               <div className="space-y-2 border-t border-ink/10 pt-5">
                 <div className="flex items-center gap-2 flex-wrap">
                   <label className="font-hand text-xl text-ink">Coachio API Key</label>
-                  <StatusPill ok={hasCoachio} okLabel="đã có" missLabel="trống" />
-                  <span className="font-sans text-[11px] text-gray-500">Cho GPT Image 2 + Nano Banana 2</span>
+                  <KeyPill ok={hasCoachio} name="Coachio" />
                 </div>
                 <input
                   type="password"
@@ -200,59 +173,28 @@ export const StepSettings: React.FC<StepSettingsProps> = ({ settings, onSave }) 
                   placeholder="lv_xxxxxxxxxxxxxxxxxxxxxxxx"
                   className="w-full bg-paper border-2 border-gray-300 focus:border-ink rounded-lg p-3 font-mono text-sm outline-none transition-colors"
                 />
-              </div>
-
-              <div className="space-y-2 border-t border-ink/10 pt-5">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <label className="font-hand text-xl text-ink">Gemini API Key</label>
-                  <StatusPill ok={hasGemini} okLabel="đã có" missLabel="trống" />
-                  <span className="font-sans text-[11px] text-gray-500">Cho Gemini 3 Pro Image</span>
-                </div>
-                <input
-                  type="password"
-                  autoComplete="off"
-                  value={draft.geminiApiKey}
-                  onChange={e => setDraft({ ...draft, geminiApiKey: e.target.value })}
-                  placeholder="AIza..."
-                  className="w-full bg-paper border-2 border-gray-300 focus:border-ink rounded-lg p-3 font-mono text-sm outline-none transition-colors"
-                />
+                <p className="font-sans text-xs text-gray-500">Cùng key với tab Text — cả 2 model ảnh đều qua Coachio.</p>
               </div>
             </>
           )}
 
           {tab === 'audio' && (
             <>
-              <div className="bg-amber-50 border-2 border-amber-200 rounded-lg p-4 space-y-1">
-                <div className="font-hand text-base text-amber-900">Provider chọn TỰ ĐỘNG theo ngôn ngữ</div>
+              {/* Language routing summary */}
+              <div className="bg-amber-50 border-2 border-amber-200 rounded-lg p-3 space-y-1">
+                <div className="font-hand text-base text-amber-900">Auto theo ngôn ngữ</div>
                 <ul className="font-sans text-xs text-amber-800/90 space-y-0.5 list-disc list-inside">
-                  <li><strong>Tiếng Anh</strong> → Coachio · ElevenLabs (Mark / Brittney)</li>
-                  <li><strong>Tiếng Việt / Nhật / khác</strong> → Gemini TTS (giọng nam / nữ chọn ở bước Audio)</li>
+                  <li><strong>English</strong> → Coachio · ElevenLabs (Mark / Brittney)</li>
+                  <li><strong>Vietnamese</strong> → Gemini (mặc định) hoặc <strong>Local TTS</strong> nếu bật</li>
+                  <li><strong>Japanese / khác</strong> → Gemini TTS</li>
                 </ul>
-                <div className="font-sans text-[11px] text-amber-700/80 pt-1">
-                  Bạn không phải chọn provider ở đây — chỉ cần dán đủ key cho ngôn ngữ định dùng.
-                </div>
               </div>
 
+              {/* Gemini key — needed for VN/JA/other */}
               <div className="space-y-2">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <label className="font-hand text-xl text-ink">Coachio API Key</label>
-                  <StatusPill ok={hasCoachio} okLabel="đã có" missLabel="trống" />
-                  <span className="font-sans text-[11px] text-gray-500">Cho TTS tiếng Anh (ElevenLabs)</span>
-                </div>
-                <input
-                  type="password"
-                  autoComplete="off"
-                  value={draft.coachioApiKey}
-                  onChange={e => setDraft({ ...draft, coachioApiKey: e.target.value })}
-                  placeholder="lv_xxxxxxxxxxxxxxxxxxxxxxxx"
-                  className="w-full bg-paper border-2 border-gray-300 focus:border-ink rounded-lg p-3 font-mono text-sm outline-none transition-colors"
-                />
-              </div>
-
-              <div className="space-y-2 border-t border-ink/10 pt-5">
-                <div className="flex items-center gap-2 flex-wrap">
                   <label className="font-hand text-xl text-ink">Gemini API Key</label>
-                  <StatusPill ok={hasGemini} okLabel="đã có" missLabel="trống" />
+                  <KeyPill ok={hasGemini} name="Gemini" />
                   <span className="font-sans text-[11px] text-gray-500">Cho TTS tiếng Việt / Nhật / khác</span>
                 </div>
                 <input
@@ -265,8 +207,86 @@ export const StepSettings: React.FC<StepSettingsProps> = ({ settings, onSave }) 
                 />
               </div>
 
+              {/* Coachio key — needed for English */}
+              <div className="space-y-2 border-t border-ink/10 pt-5">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <label className="font-hand text-xl text-ink">Coachio API Key</label>
+                  <KeyPill ok={hasCoachio} name="Coachio" />
+                  <span className="font-sans text-[11px] text-gray-500">Cho TTS tiếng Anh (ElevenLabs)</span>
+                </div>
+                <input
+                  type="password"
+                  autoComplete="off"
+                  value={draft.coachioApiKey}
+                  onChange={e => setDraft({ ...draft, coachioApiKey: e.target.value })}
+                  placeholder="lv_xxxxxxxxxxxxxxxxxxxxxxxx"
+                  className="w-full bg-paper border-2 border-gray-300 focus:border-ink rounded-lg p-3 font-mono text-sm outline-none transition-colors"
+                />
+              </div>
+
+              {/* Local TTS toggle + URL */}
+              <div className="space-y-2 border-t border-ink/10 pt-5">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <label className="font-hand text-xl text-ink flex items-center gap-2">
+                    💻 Local TTS <span className="font-sans text-[11px] font-normal px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded uppercase tracking-wider">VN only</span>
+                  </label>
+                  <label className="inline-flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={draft.localTtsEnabled}
+                      onChange={e => setDraft({ ...draft, localTtsEnabled: e.target.checked })}
+                      className="w-5 h-5 accent-ink"
+                    />
+                    <span className="font-hand text-base text-ink">{draft.localTtsEnabled ? 'Đang bật' : 'Tắt'}</span>
+                  </label>
+                </div>
+                <p className="font-sans text-xs text-gray-600">
+                  Kết nối server <strong>VieNeu Studio</strong> chạy local — không cần API key, không tốn token.
+                  Khi bật, Bước Audio thêm dropdown chọn Gemini/Local cho kịch bản tiếng Việt.
+                </p>
+
+                {draft.localTtsEnabled && (
+                  <div className="space-y-2 pt-2">
+                    <label className="font-hand text-base text-ink block">URL server</label>
+                    <div className="flex gap-2 flex-wrap">
+                      <input
+                        type="text"
+                        value={draft.localTtsUrl}
+                        onChange={e => setDraft({ ...draft, localTtsUrl: e.target.value })}
+                        placeholder={DEFAULT_LOCAL_TTS_URL}
+                        className="flex-1 min-w-[240px] bg-paper border-2 border-gray-300 focus:border-ink rounded-lg p-2 font-mono text-sm outline-none transition-colors"
+                      />
+                      <button
+                        type="button"
+                        onClick={testLocalTts}
+                        disabled={localCheckState.state === 'checking'}
+                        className="font-hand text-sm px-3 py-1.5 rounded-lg border-2 border-ink/40 hover:border-ink bg-white shadow-sm disabled:opacity-60"
+                      >
+                        {localCheckState.state === 'checking' ? '⏳ Đang test…' : '🔌 Test kết nối'}
+                      </button>
+                    </div>
+                    {localCheckState.state === 'ok' && (
+                      <div className="p-2 rounded border-2 border-emerald-200 bg-emerald-50 font-sans text-xs text-emerald-800">
+                        ✓ Kết nối OK · {localCheckState.voiceCount} giọng sẵn sàng.
+                      </div>
+                    )}
+                    {localCheckState.state === 'err' && (
+                      <div className="p-2 rounded border-2 border-red-200 bg-red-50 font-sans text-xs text-red-800">
+                        ⚠️ {localCheckState.msg}
+                      </div>
+                    )}
+                    <p className="font-sans text-[11px] text-gray-500">
+                      Server mặc định: <code className="bg-ink/5 px-1 rounded">{DEFAULT_LOCAL_TTS_URL}</code>.
+                      Request tự chạy qua Vite proxy (<code className="bg-ink/5 px-1 rounded">/local-tts</code>) để tránh CORS —
+                      không cần sửa server VieNeu.
+                      Đổi port khác? Set env <code className="bg-ink/5 px-1 rounded">VITE_LOCAL_TTS_TARGET</code> rồi restart <code className="bg-ink/5 px-1 rounded">npm run dev</code>.
+                    </p>
+                  </div>
+                )}
+              </div>
+
               <p className="font-sans text-[11px] text-gray-500">
-                💡 Chọn giọng nam/nữ + phong cách đọc ngay tại bước "Phòng Thu Âm".
+                💡 Chọn giọng nam/nữ + phong cách đọc ngay ở Bước Audio.
               </p>
             </>
           )}
@@ -276,8 +296,8 @@ export const StepSettings: React.FC<StepSettingsProps> = ({ settings, onSave }) 
               <div className="space-y-2">
                 <div className="flex items-center gap-2 flex-wrap">
                   <label className="font-hand text-xl text-ink">Groq API Key</label>
-                  <StatusPill ok={hasGroq} okLabel="đã có" missLabel="trống" />
-                  <span className="font-sans text-[11px] text-gray-500">Cho khớp caption từng từ</span>
+                  <KeyPill ok={hasGroq} name="Groq" />
+                  <span className="font-sans text-[11px] text-gray-500">Optional</span>
                 </div>
                 <input
                   type="password"
@@ -288,33 +308,26 @@ export const StepSettings: React.FC<StepSettingsProps> = ({ settings, onSave }) 
                   className="w-full bg-paper border-2 border-gray-300 focus:border-ink rounded-lg p-3 font-mono text-sm outline-none transition-colors"
                 />
                 <p className="font-sans text-xs text-gray-500">
-                  Dùng <code className="bg-ink/5 px-1 rounded">whisper-large-v3-turbo</code> ở bước 7 để khớp caption chuẩn từng từ với audio. ~$0.0004/phút. Lấy ở console.groq.com.
-                </p>
-              </div>
-
-              <div className="bg-ink/[0.02] border border-ink/10 rounded-lg p-4">
-                <div className="font-hand text-base text-ink mb-1">Tại sao cần Whisper?</div>
-                <p className="font-sans text-xs text-gray-600 leading-relaxed">
-                  TTS trả về 1 file audio liền mạch. Để biết câu nào nằm ở giây nào trong file đó (để khớp scene + karaoke caption), cần transcribe ngược lại bằng Whisper.
-                  Không có Groq key → vẫn render được nhưng caption chỉ chia ước tính theo số từ.
+                  Dùng <code className="bg-ink/5 px-1 rounded">whisper-large-v3-turbo</code> để khớp caption từng từ.
+                  ~$0.0004/phút. Không có key vẫn render được — caption chỉ chia ước tính theo số từ.
                 </p>
               </div>
             </>
           )}
         </div>
 
-        <div className="border-t-2 border-ink/10 px-6 py-4 bg-ink/[0.02] flex items-center gap-3">
+        {/* Footer: save + status pill row */}
+        <div className="border-t-2 border-ink/10 px-6 py-4 bg-ink/[0.02] flex items-center gap-3 flex-wrap">
           <Button onClick={handleSave} className="px-6">
             Lưu cấu hình
           </Button>
-          {saved && (
-            <span className="font-hand text-lg text-green-700">Đã lưu ✓</span>
-          )}
+          {saved && <span className="font-hand text-lg text-green-700">Đã lưu ✓</span>}
           <div className="ml-auto flex items-center gap-2 text-xs">
-            <span className="font-sans text-gray-500">Trạng thái key:</span>
-            <StatusPill ok={hasCoachio} okLabel="Coachio" missLabel="Coachio" />
-            <StatusPill ok={hasGemini}  okLabel="Gemini"  missLabel="Gemini" />
-            <StatusPill ok={hasGroq}    okLabel="Groq"    missLabel="Groq" />
+            <span className="font-sans text-gray-500">Keys:</span>
+            <KeyPill ok={hasCoachio} name="Coachio" />
+            <KeyPill ok={hasGemini}  name="Gemini" />
+            <KeyPill ok={hasGroq}    name="Groq" />
+            <KeyPill ok={draft.localTtsEnabled} name="Local" />
           </div>
         </div>
       </div>

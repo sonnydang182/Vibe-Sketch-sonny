@@ -2,6 +2,20 @@
 
 Format follows [Keep a Changelog](https://keepachangelog.com/). Dates are YYYY-MM-DD.
 
+## [0.4.0] — 2026-06-24
+
+### Added
+- **Local TTS (VieNeu Studio)** — self-hosted Vietnamese TTS via `http://127.0.0.1:8001`. No API key required. Toggle in Settings → 🎙 Audio. Endpoints wrapped: `GET /api/health`, `GET /api/voices`, `POST /api/tts`. Includes a "🔌 Test kết nối" button in Settings that pings `/api/health` + lists available voices.
+- **Vite dev-server proxy** for Local TTS at `/local-tts/*` → `${VITE_LOCAL_TTS_TARGET || http://127.0.0.1:8001}/*`. Bypasses CORS entirely — browser sees same-origin. Auto-rewrites `http://127.0.0.1:*` / `http://localhost:*` URLs to the proxy path at fetch time so users don't have to touch the URL field.
+- **Vietnamese TTS provider dropdown** in the Audio step — pick between ☁️ Gemini and 💻 Local (only appears when Local TTS is enabled). Persisted as `settings.vietnameseTtsPreference`.
+- **Local voice grid** in the Audio step — fetches `/api/voices` on demand, shows a "🎲 Giọng mặc định" tile plus each available voice. Surfaces server errors inline.
+- **Settings UI restructured** — 4 focused tabs (Text / Ảnh / Audio / Whisper), each showing only the keys + options relevant to that function. Removed the "Chọn provider audio" section (provider now auto-derived from language). Added a compact status bar at the bottom with pills for Coachio / Gemini / Groq / Local.
+
+### Changed (breaking)
+- **Text generation is Coachio-only** — Gemini fallback removed from `generateViralTitles`, `suggestContextOutline`, `generateScriptScenes`, and `rewriteScript`. Calls throw with "Cần Coachio API key" instead of silently rerouting.
+- **Image generation is Coachio-only** — `ImageProvider` narrowed to `'coachio_gpt_image_2' | 'coachio_nano_banana_2'`. Gemini `gemini-3-pro-image-preview` path removed from both `generateDoodleImage` and `generateThumbnailImage`.
+- **Error messages surface the missing setting** — e.g. "Cần Gemini API key cho TTS tiếng Việt / Nhật / khác (vào Cấu hình → Audio)" instead of a generic prompt.
+
 ## [0.3.0] — 2026-06-01
 
 ### Added

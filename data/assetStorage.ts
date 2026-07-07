@@ -40,6 +40,12 @@ export interface ProjectAssets {
    */
   audioBlob?: Blob;
   /**
+   * Final rendered mp4 from step 7. Persisted so refreshing the page after
+   * a successful render doesn't force a re-encode (which takes 1-3 minutes).
+   * Same Blob-storage strategy as audioBlob.
+   */
+  videoBlob?: Blob;
+  /**
    * Whisper alignment outputs — persisted so the user doesn't lose ~$0.005
    * of API spend whenever they reload or switch projects. Both fields are
    * serialised as plain JSON arrays in IDB.
@@ -76,6 +82,7 @@ export const saveProjectAssets = async (id: string, assets: ProjectAssets): Prom
       // The rest preserve previous values when the new one is undefined.
       thumbnailUrl: assets.thumbnailUrl ?? prev?.thumbnailUrl,
       audioBlob: assets.audioBlob ?? prev?.audioBlob,
+      videoBlob: assets.videoBlob ?? prev?.videoBlob,
       whisperTimings: assets.whisperTimings ?? prev?.whisperTimings,
       whisperWords: assets.whisperWords ?? prev?.whisperWords,
     };

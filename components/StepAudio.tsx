@@ -2,6 +2,11 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Button } from './Button';
 import { Scene, GenerationConfig, AudioProvider, Language } from '../types';
 import { COACHIO_VOICES } from '../services/coachioService';
+import {
+  LocalTtsVoice,
+  listLocalTtsVoices,
+  checkLocalTtsHealth,
+} from '../services/localTtsService';
 
 interface StepAudioProps {
   scenes: Scene[];
@@ -28,6 +33,17 @@ interface StepAudioProps {
   onChangeCoachioVoice: (voiceId: string) => void;
   onChangeGeminiStyle: (style: string) => void;
   onChangeGeminiGender: (g: 'female' | 'male') => void;
+  // ---- Local TTS (Vietnamese only) ----
+  /** Toggle from Settings — if false, the "Local" option is disabled. */
+  localTtsEnabled: boolean;
+  /** Base URL for the local TTS server (e.g. http://127.0.0.1:8001). */
+  localTtsUrl: string;
+  /** Selected voice id from GET /api/voices. */
+  localTtsVoice: string;
+  /** Vietnamese TTS provider preference (gemini | local). */
+  vietnameseTtsPreference: 'gemini' | 'local';
+  onChangeLocalTtsVoice: (voiceId: string) => void;
+  onChangeVietnameseTtsPreference: (p: 'gemini' | 'local') => void;
 }
 
 const DURATIONS: GenerationConfig['duration'][] = ['Short (60s)', 'Medium (3 mins)', 'Long (5-10 mins)'];
@@ -67,11 +83,56 @@ export const StepAudio: React.FC<StepAudioProps> = ({
   onChangeCoachioVoice,
   onChangeGeminiStyle,
   onChangeGeminiGender,
+  localTtsEnabled,
+  localTtsUrl,
+  localTtsVoice,
+  vietnameseTtsPreference,
+  onChangeLocalTtsVoice,
+  onChangeVietnameseTtsPreference,
 }) => {
   const audioRef = useRef<HTMLAudioElement>(null);
-  // Provider is LANGUAGE-DRIVEN — App.tsx keeps settings.audioProvider in
-  // sync but we compute locally too in case the effect hasn't fired yet.
+  // Provider mode is derived from language + Vietnamese sub-preference.
+  //   English    → Coachio ElevenLabs
+  //   Vietnamese → Gemini OR Local (user picks in this component)
+  //   Japanese/x → Gemini
   const isCoachio = language === 'English';
+  const canUseLocal = language === 'Vietnamese' && localTtsEnabled;
+  const isLocal = canUseLocal && vietnameseTtsPreference === 'local';
+  const isGemini = !isCoachio && !isLocal;
+
+  // Fetch local voices on demand — only when the user is on Vietnamese +
+  // Local mode. Fetches lazily and caches while this step is mounted.
+  const [localVoices, setLocalVoices] = useState<LocalTtsVoice[]>([]);
+  const [localLoadingVoices, setLocalLoadingVoices] = useState(false);
+  const [localHealthErr, setLocalHealthErr] = useState<string | undefined>(undefined);
+
+  useEffect(() => {
+    if (!isLocal) return;
+    let cancelled = false;
+    (async () => {
+      setLocalLoadingVoices(true);
+      setLocalHealthErr(undefined);
+      try {
+        const health = await checkLocalTtsHealth(localTtsUrl);
+        if (cancelled) return;
+        if (!health.loaded) {
+          setLocalHealthErr('Server chưa nạp model — chờ chút rồi thử lại.');
+        }
+        const voices = await listLocalTtsVoices(localTtsUrl);
+        if (!cancelled) setLocalVoices(voices);
+      } catch (e: any) {
+        if (!cancelled) {
+          setLocalHealthErr(
+            `Không kết nối được: ${e?.message || e}. Kiểm tra server đã chạy tại ${localTtsUrl}?`,
+          );
+          setLocalVoices([]);
+        }
+      } finally {
+        if (!cancelled) setLocalLoadingVoices(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isLocal, localTtsUrl]);
 
   const derivedScript = scenes.map(s => s.voiceover).filter(Boolean).join(' ');
   const [editing, setEditing] = useState(false);
@@ -88,8 +149,13 @@ export const StepAudio: React.FC<StepAudioProps> = ({
     if (!editing) setEditedScript(derivedScript);
   }, [derivedScript, editing]);
 
+  // Provider key requirements:
+  //   Coachio path  → needs Coachio key
+  //   Gemini path   → needs Gemini key
+  //   Local path    → needs the server reachable (checked separately)
   const providerKeyMissing =
-    (isCoachio && !hasCoachioKey) || (!isCoachio && !hasGeminiKey);
+    (isCoachio && !hasCoachioKey) ||
+    (isGemini && !hasGeminiKey);
 
   const scriptToUse = editing ? editedScript : derivedScript;
   const wordCount = scriptToUse.trim().split(/\s+/).filter(Boolean).length;
@@ -97,7 +163,9 @@ export const StepAudio: React.FC<StepAudioProps> = ({
 
   const providerLabel = isCoachio
     ? 'Coachio · ElevenLabs (EN)'
-    : `Gemini TTS (${language})`;
+    : isLocal
+      ? `Local TTS · VieNeu (${language})`
+      : `Gemini TTS (${language})`;
   // Localized labels for the gender picker — chosen language drives copy.
   const genderLabels: Record<Language, { female: string; male: string; heading: string; hint: string }> = {
     Vietnamese: { female: 'Giọng nữ', male: 'Giọng nam', heading: 'Chọn giọng',
@@ -157,6 +225,29 @@ export const StepAudio: React.FC<StepAudioProps> = ({
         </div>
       )}
 
+      {/* Vietnamese-only: pick provider (Gemini vs Local VieNeu). Only shown
+          when local TTS is enabled in Settings. */}
+      {canUseLocal && (
+        <div className="bg-emerald-50/60 backdrop-blur-sm p-4 rounded-xl border-2 border-emerald-200 space-y-2">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <label className="font-hand text-lg text-emerald-900">Provider TTS tiếng Việt</label>
+            <span className="font-sans text-[11px] text-emerald-800/70">
+              Local đang bật ({localTtsUrl})
+            </span>
+          </div>
+          <div className="flex gap-2">
+            <select
+              value={vietnameseTtsPreference}
+              onChange={e => onChangeVietnameseTtsPreference(e.target.value as 'gemini' | 'local')}
+              className="flex-1 bg-white border-2 border-emerald-300 focus:border-emerald-600 rounded-lg p-2 font-sans text-sm outline-none transition-colors"
+            >
+              <option value="gemini">☁️ Gemini TTS (cloud — cần API key)</option>
+              <option value="local">💻 Local TTS · VieNeu Studio (không cần key)</option>
+            </select>
+          </div>
+        </div>
+      )}
+
       {/* Voice / Style picker — inline so user can tune the voice without
           leaving the wizard. Updates persist via App's settings handler. */}
       <div className="bg-white/50 backdrop-blur-sm p-4 rounded-xl border-2 border-ink/10 space-y-3">
@@ -185,6 +276,66 @@ export const StepAudio: React.FC<StepAudioProps> = ({
                 </button>
               ))}
             </div>
+          </>
+        ) : isLocal ? (
+          <>
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <label className="font-hand text-lg text-ink">Chọn giọng (Local)</label>
+              <span className="font-sans text-[11px] text-gray-500">{providerLabel}</span>
+            </div>
+
+            {localHealthErr && (
+              <div className="p-3 rounded-lg border-2 border-red-200 bg-red-50 font-sans text-xs text-red-800">
+                ⚠️ {localHealthErr}
+              </div>
+            )}
+
+            {localLoadingVoices ? (
+              <div className="font-sans text-sm text-gray-500 italic">Đang tải danh sách giọng…</div>
+            ) : localVoices.length === 0 ? (
+              <div className="font-sans text-sm text-gray-500 italic">
+                {localHealthErr
+                  ? 'Không tải được giọng — kiểm tra server rồi tải lại trang.'
+                  : 'Server không có giọng nào — dùng giọng mặc định của VieNeu.'}
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-64 overflow-y-auto pr-1">
+                <button
+                  onClick={() => onChangeLocalTtsVoice('')}
+                  className={`
+                    p-2 rounded-lg border-2 text-left transition-all
+                    ${localTtsVoice === ''
+                      ? 'bg-ink text-paper border-ink shadow-md'
+                      : 'bg-white border-gray-200 text-gray-600 hover:border-gray-400'}
+                  `}
+                >
+                  <div className="font-hand text-base">🎲 Giọng mặc định</div>
+                  <div className={`font-mono text-[10px] truncate ${localTtsVoice === '' ? 'text-paper/60' : 'text-gray-400'}`}>
+                    (server chọn)
+                  </div>
+                </button>
+                {localVoices.map(v => (
+                  <button
+                    key={v.id}
+                    onClick={() => onChangeLocalTtsVoice(v.id)}
+                    className={`
+                      p-2 rounded-lg border-2 text-left transition-all
+                      ${localTtsVoice === v.id
+                        ? 'bg-ink text-paper border-ink shadow-md'
+                        : 'bg-white border-gray-200 text-gray-600 hover:border-gray-400'}
+                    `}
+                  >
+                    <div className="font-hand text-base">{v.label}</div>
+                    <div className={`font-mono text-[10px] truncate ${localTtsVoice === v.id ? 'text-paper/60' : 'text-gray-400'}`}>
+                      {v.id}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+            <p className="font-sans text-[11px] text-gray-500">
+              💻 Local TTS chạy tại {localTtsUrl}. Không dùng API cloud → không tốn token, giới hạn quota theo máy bạn.
+            </p>
           </>
         ) : (
           <>

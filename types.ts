@@ -97,8 +97,8 @@ export interface VideoRenderProgress {
 
 export type Language = 'Vietnamese' | 'English' | 'Japanese';
 
-export type ImageProvider = 'gemini' | 'coachio_gpt_image_2' | 'coachio_nano_banana_2';
-export type AudioProvider = 'gemini' | 'coachio_elevenlabs';
+export type ImageProvider = 'coachio_gpt_image_2' | 'coachio_nano_banana_2';
+export type AudioProvider = 'gemini' | 'coachio_elevenlabs' | 'local_veneu';
 
 export type CharacterId =
   | 'stickman'
@@ -162,6 +162,25 @@ export interface AppSettings {
    * geminiService). Defaults to 'female'.
    */
   geminiTtsGender: 'female' | 'male';
+  /**
+   * Local Vietnamese TTS (VieNeu Studio) — self-hosted server, no API key.
+   * When enabled AND the user picks "Local TTS" for a Vietnamese project,
+   * TTS is routed to the local server instead of Gemini.
+   */
+  localTtsEnabled: boolean;
+  /** Local TTS base URL — defaults to http://127.0.0.1:8001. */
+  localTtsUrl: string;
+  /**
+   * Voice id from GET /api/voices. Empty = server default. Cached so the
+   * pick persists across sessions once the user has fetched voices once.
+   */
+  localTtsVoice: string;
+  /**
+   * Which TTS provider is preferred for Vietnamese scripts. English always
+   * uses Coachio ElevenLabs; other languages always use Gemini. Vietnamese
+   * lets the user pick between Gemini (cloud) and Local (VieNeu Studio).
+   */
+  vietnameseTtsPreference: 'gemini' | 'local';
   /** Caption render style — persisted so the picker remembers the last choice. */
   captionStyle: CaptionStyle;
   /** Scene transition mode for both preview and final mp4. */

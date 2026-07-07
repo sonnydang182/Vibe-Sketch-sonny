@@ -107,7 +107,8 @@ const LANGUAGE_CONFIG: Record<Language, {
 };
 
 /**
- * Generate Viral Titles. Uses Coachio when its key is set, otherwise Gemini.
+ * Generate Viral Titles via Coachio (only text provider now — Gemini path
+ * removed to keep the config simple).
  */
 export const generateViralTitles = async (
   topic: string,
@@ -134,34 +135,16 @@ export const generateViralTitles = async (
   `;
 
   const coachioKey = getActiveCoachioKey();
-  if (coachioKey) {
-    try {
-      return await coachioChatJSON<string[]>(coachioKey, prompt, { temperature: 0.9 });
-    } catch (error) {
-      console.error("Error generating titles (Coachio):", error);
-      return ["Error generating titles. Please try again."];
-    }
+  if (!coachioKey) {
+    throw new Error("Cần Coachio API key để tạo tiêu đề (vào Cấu hình → Text).");
   }
-
-  const ai = getAI();
   try {
-    return await withRetry(async () => {
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING }
-          }
-        }
-      });
-      return response.text ? JSON.parse(response.text) : [];
-    });
+    return await coachioChatJSON<string[]>(coachioKey, prompt, { temperature: 0.9 });
   } catch (error) {
-    console.error("Error generating titles:", error);
-    return ["Error generating titles. Please try again."];
+    console.error("Error generating titles (Coachio):", error);
+    throw error instanceof Error
+      ? new Error(`[Coachio titles] ${error.message}`)
+      : new Error(`[Coachio titles] Unknown error`);
   }
 };
 
@@ -222,27 +205,13 @@ ${t.closing}
 `;
 
   const coachioKey = getActiveCoachioKey();
-  if (coachioKey) {
-    try {
-      return await coachioChat(coachioKey, prompt, { temperature: 0.4, maxTokens: 1200 });
-    } catch (error) {
-      console.error('Error generating context outline (Coachio):', error);
-      throw error;
-    }
+  if (!coachioKey) {
+    throw new Error("Cần Coachio API key để tạo dàn ý (vào Cấu hình → Text).");
   }
-
-  const ai = getAI();
   try {
-    return await withRetry(async () => {
-      const response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: prompt,
-        config: { temperature: 0.4 },
-      });
-      return response.text || '';
-    });
+    return await coachioChat(coachioKey, prompt, { temperature: 0.4, maxTokens: 1200 });
   } catch (error) {
-    console.error('Error generating context outline:', error);
+    console.error('Error generating context outline (Coachio):', error);
     throw error;
   }
 };
@@ -373,78 +342,41 @@ export const generateScriptScenes = async (
     }));
 
   const coachioKey = getActiveCoachioKey();
-  if (coachioKey) {
-    // Script JSON is the largest structured output in the app. Try the
-    // smart (pro) tier first; if Coachio's catalog doesn't include it (404
-    // / "unknown model"), fall back through full-flash and finally lite.
-    // This way the user always gets a working result, and we still default
-    // to the most reliable model when available.
-    const candidates = [
-      COACHIO_SMART_MODEL,        // google/gemini-3.1-pro — best at strict JSON
-      "google/gemini-3.1-flash",  // mid tier fallback
-      "google/gemini-3.1-flash-lite", // worst case — same as the default
-    ];
-    const errors: string[] = [];
-    for (const model of candidates) {
-      try {
-        console.log(`[script] Coachio model: ${model}`);
-        const data = await coachioChatJSON<SceneJSON[]>(coachioKey, prompt, {
-          model,
-          temperature: 0.8,
-          maxTokens: 8192,
-        });
-        if (!Array.isArray(data) || data.length === 0) {
-          throw new Error(`returned ${Array.isArray(data) ? 'empty array' : 'non-array value'}`);
-        }
-        return toScenes(data);
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        console.warn(`[script] ${model} failed: ${msg}`);
-        errors.push(`${model}: ${msg}`);
-        // Only continue the cascade for model-availability errors. If it's
-        // a key/auth issue, fail fast — every subsequent model will fail
-        // the same way and we just waste roundtrips.
-        const lower = msg.toLowerCase();
-        const isModelMissing = /\b(404|400|model|not found|unknown|unsupported|invalid)\b/.test(lower);
-        const isAuth = /\b(401|403|unauthor|forbidden|api[- ]?key)\b/.test(lower);
-        if (isAuth || !isModelMissing) break;
-      }
-    }
-    throw new Error(`[Coachio script] Tất cả model thất bại:\n${errors.join('\n')}`);
+  if (!coachioKey) {
+    throw new Error("Cần Coachio API key để tạo kịch bản (vào Cấu hình → Text).");
   }
-
-  const ai = getAI();
-  try {
-    return await withRetry(async () => {
-      const response = await ai.models.generateContent({
-        model: "gemini-3-pro-preview",
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                voiceover: { type: Type.STRING },
-                visualPrompt: { type: Type.STRING },
-                keywords: { type: Type.STRING }
-              },
-              required: ["voiceover", "visualPrompt", "keywords"]
-            }
-          }
-        }
+  // Script JSON is the largest structured output in the app. Try the smart
+  // (pro) tier first; if Coachio's catalog doesn't include it (404 /
+  // "unknown model"), fall back through full-flash and finally lite.
+  const candidates = [
+    COACHIO_SMART_MODEL,             // google/gemini-3.1-pro — best at strict JSON
+    "google/gemini-3.1-flash",       // mid tier fallback
+    "google/gemini-3.1-flash-lite",  // worst case — same as the default
+  ];
+  const errors: string[] = [];
+  for (const model of candidates) {
+    try {
+      console.log(`[script] Coachio model: ${model}`);
+      const data = await coachioChatJSON<SceneJSON[]>(coachioKey, prompt, {
+        model,
+        temperature: 0.8,
+        maxTokens: 8192,
       });
-
-      if (response.text) {
-        return toScenes(JSON.parse(response.text));
+      if (!Array.isArray(data) || data.length === 0) {
+        throw new Error(`returned ${Array.isArray(data) ? 'empty array' : 'non-array value'}`);
       }
-      return [];
-    });
-  } catch (error) {
-    console.error("Error generating script:", error);
-    return [];
+      return toScenes(data);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.warn(`[script] ${model} failed: ${msg}`);
+      errors.push(`${model}: ${msg}`);
+      const lower = msg.toLowerCase();
+      const isModelMissing = /\b(404|400|model|not found|unknown|unsupported|invalid)\b/.test(lower);
+      const isAuth = /\b(401|403|unauthor|forbidden|api[- ]?key)\b/.test(lower);
+      if (isAuth || !isModelMissing) break;
+    }
   }
+  throw new Error(`[Coachio script] Tất cả model thất bại:\n${errors.join('\n')}`);
 };
 
 interface CharacterRef {
@@ -566,36 +498,7 @@ export const generateDoodleImage = async (
     });
   }
 
-  // Gemini path — attach all doodle reference images inline
-  const ai = getAI();
-  const inlineParts = doodleRefs
-    .filter(r => r.inline)
-    .map(r => ({ inlineData: { mimeType: r.inline!.mimeType, data: r.inline!.data } }));
-  const contents = inlineParts.length > 0
-    ? [{ role: 'user', parts: [...inlineParts, { text: fullPrompt }] }]
-    : fullPrompt;
-
-  return withRetry(async () => {
-    const response = await ai.models.generateContent({
-      model: "gemini-3-pro-image-preview",
-      contents: contents as any,
-      config: {
-        imageConfig: {
-            aspectRatio: aspectRatio,
-            imageSize: "1K"
-        }
-      }
-    });
-
-    if (response.candidates && response.candidates[0].content.parts) {
-      for (const part of response.candidates[0].content.parts) {
-        if (part.inlineData && part.inlineData.data) {
-          return `data:image/png;base64,${part.inlineData.data}`;
-        }
-      }
-    }
-    return undefined;
-  });
+  throw new Error("Cần Coachio API key + chọn model ảnh trong Cấu hình → Image.");
 };
 
 /**
@@ -693,36 +596,7 @@ ${doodleRefs.map((r, i) => `      - Character ${i + 1} ("${r.label}"): ${r.style
       });
     }
 
-    // Gemini path — attach all reference images inline
-    const ai = getAI();
-    const inlineParts = doodleRefs
-      .filter(r => r.inline)
-      .map(r => ({ inlineData: { mimeType: r.inline!.mimeType, data: r.inline!.data } }));
-    const contents = inlineParts.length > 0
-      ? [{ role: 'user', parts: [...inlineParts, { text: prompt }] }]
-      : prompt;
-
-    return withRetry(async () => {
-      const response = await ai.models.generateContent({
-        model: "gemini-3-pro-image-preview",
-        contents: contents as any,
-        config: {
-          imageConfig: {
-              aspectRatio: aspectRatio,
-              imageSize: "1K"
-          }
-        }
-      });
-
-      if (response.candidates && response.candidates[0].content.parts) {
-        for (const part of response.candidates[0].content.parts) {
-          if (part.inlineData && part.inlineData.data) {
-            return `data:image/png;base64,${part.inlineData.data}`;
-          }
-        }
-      }
-      return undefined;
-    });
+    throw new Error("Cần Coachio API key + chọn model ảnh trong Cấu hình → Image.");
   };
 
 interface RewriteOptions {
@@ -829,19 +703,14 @@ ${contextBlock}
   `;
 
   const coachioKey = getActiveCoachioKey();
+  if (!coachioKey) {
+    throw new Error("Cần Coachio API key để rewrite voiceover (vào Cấu hình → Text).");
+  }
 
   const callOnce = async (extraInstruction = ''): Promise<string> => {
     const fullPrompt = extraInstruction ? `${prompt}\n\n${extraInstruction}` : prompt;
-    if (coachioKey) {
-      const raw = await coachioChat(coachioKey, fullPrompt, { temperature: 0.8 });
-      return stripWrappingQuotes(raw);
-    }
-    const ai = getAI();
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: fullPrompt,
-    });
-    return stripWrappingQuotes(response.text || '');
+    const raw = await coachioChat(coachioKey, fullPrompt, { temperature: 0.8 });
+    return stripWrappingQuotes(raw);
   };
 
   try {

@@ -9,7 +9,8 @@ Tạo nhanh video kể chuyện kiểu **người que / doodle** chỉ từ mộ
 - **AI gợi ý ngữ cảnh**: nhập sườn nội dung; AI viết dàn ý trung lập, đánh dấu chỗ cần kiểm chứng (`[cần nguồn]`). Tiêu đề + kịch bản bám theo dàn ý này thay vì viết generic.
 - **Voiceover thông minh theo ngôn ngữ**:
   - 🇺🇸 English → Coachio · ElevenLabs (Mark / Brittney).
-  - 🇻🇳 / 🇯🇵 / khác → Gemini TTS với picker giọng nam / nữ + 4 preset phong cách.
+  - 🇻🇳 Vietnamese → Gemini TTS **hoặc Local TTS (VieNeu Studio)** — bật local TTS trong Cấu hình, chạy server tại `127.0.0.1:8001`, không cần API key.
+  - 🇯🇵 / khác → Gemini TTS với picker giọng nam / nữ + 4 preset phong cách.
 - **Whisper alignment** (Groq `whisper-large-v3-turbo`): khớp caption từng từ với audio, hỗ trợ karaoke style.
 - **Caption editor**: 4 mode (cụm từ / một từ / karaoke / cả câu), font size slider, position, highlight, sửa tay caption khi Whisper nhầm chữ.
 - **Scene transitions**: cut / fade / Ken Burns. Render mp4 đúng style đã chọn trong preview.
@@ -20,9 +21,9 @@ Tạo nhanh video kể chuyện kiểu **người que / doodle** chỉ từ mộ
 
 | Function | Provider | Note |
 |---|---|---|
-| Tạo Text (title, script, outline) | Coachio (`gemini-3.1-pro` cho script, `flash-lite` cho title/outline) — fallback Gemini | Auto-cascade nếu Coachio thiếu model |
-| Tạo Ảnh (scene + thumbnail) | Coachio **GPT Image 2**, Coachio **Nano Banana 2**, Gemini **3 Pro Image** | Chọn model trong Cấu hình → tab 🎨 |
-| Tạo Audio (TTS) | English: Coachio · ElevenLabs · VN/JA/khác: Gemini TTS | Tự động theo ngôn ngữ |
+| Tạo Text (title, script, outline) | Coachio (`gemini-3.1-pro` cho script, `flash-lite` cho title/outline) | Auto-cascade `pro → flash → flash-lite` nếu model không có |
+| Tạo Ảnh (scene + thumbnail) | Coachio **GPT Image 2** hoặc Coachio **Nano Banana 2** | Chọn model trong Cấu hình → tab 🎨 |
+| Tạo Audio (TTS) | EN: Coachio · ElevenLabs · VN: Gemini **hoặc Local (VieNeu)** · JA/khác: Gemini TTS | Tự động theo ngôn ngữ, VN có dropdown Gemini/Local |
 | Whisper alignment | Groq `whisper-large-v3-turbo` | Optional — không có vẫn render được, caption chia ước tính theo số từ |
 
 ## Chạy local
@@ -41,7 +42,19 @@ App chạy tại `http://localhost:5173/`. Vào tab **Cấu hình** — UI chia 
 - 🎙 **Tạo Audio**: Coachio key (TTS tiếng Anh) + Gemini key (TTS tiếng Việt / Nhật).
 - 🔉 **Whisper**: Groq key (optional, cho caption sync).
 
-Dán đủ **Coachio API Key** là chạy được toàn bộ wizard tiếng Anh (text + ảnh + voiceover + render). Nếu làm video tiếng Việt / Nhật thì cần thêm **Gemini API Key** cho phần TTS.
+Dán đủ **Coachio API Key** là chạy được toàn bộ wizard tiếng Anh (text + ảnh + voiceover + render). Nếu làm video tiếng Việt / Nhật thì cần thêm **Gemini API Key** cho phần TTS — hoặc bật **Local TTS (VieNeu Studio)** cho tiếng Việt để khỏi tốn token cloud.
+
+### Chạy Local TTS (VieNeu Studio) — tuỳ chọn cho tiếng Việt
+
+1. Bật server VieNeu Studio local (mặc định tại `http://127.0.0.1:8001`).
+2. Vào Cấu hình → tab 🎙 Audio → bật **Local TTS** → bấm **🔌 Test kết nối**.
+3. Ở Bước Audio (khi script tiếng Việt), chọn **💻 Local TTS** trong dropdown provider.
+4. Đổi port khác:
+   ```bash
+   VITE_LOCAL_TTS_TARGET=http://127.0.0.1:9000 npm run dev
+   ```
+
+Vite dev-server đã có sẵn proxy `/local-tts/*` → server VieNeu, browser chạy same-origin nên không cần bật CORS ở server VieNeu.
 
 ## Stack
 
